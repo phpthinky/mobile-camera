@@ -27,6 +27,7 @@ object CameraFunctions {
         override fun execute(parameters: Map<String, Any>): Map<String, Any> {
             val id = parameters["id"] as? String
             val event = parameters["event"] as? String
+            val processing = ImageProcessingOptions.fromBridgeInput(parameters["processing"])
 
             Log.d("CameraFunctions.GetPhoto", "📸 Capturing photo with id=$id, event=$event")
 
@@ -34,7 +35,7 @@ object CameraFunctions {
             Handler(Looper.getMainLooper()).post {
                 try {
                     val coord = CameraCoordinator.install(activity)
-                    coord.launchCamera(id, event)
+                    coord.launchCamera(id, event, processing)
                 } catch (e: Exception) {
                     Log.e("CameraFunctions.GetPhoto", "❌ Error launching camera: ${e.message}", e)
                 }

@@ -26,6 +26,7 @@ enum CameraFunctions {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
+            let processing = ImageProcessingOptions.fromBridge(parameters["processing"])
 
             print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil")")
 
@@ -43,14 +44,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentPhotoPicker(id: id, event: event)
+                presentPhotoPicker(id: id, event: event, processing: processing)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentPhotoPicker(id: id, event: event)
+                            self.presentPhotoPicker(id: id, event: event, processing: processing)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -74,11 +75,12 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentPhotoPicker(id: String?, event: String?) {
+        private func presentPhotoPicker(id: String?, event: String?, processing: ImageProcessingOptions) {
             DispatchQueue.main.async {
                 // Set id and event on delegate before presenting picker
                 CameraPhotoDelegate.shared.pendingPhotoId = id
                 CameraPhotoDelegate.shared.pendingPhotoEvent = event
+                CameraPhotoDelegate.shared.pendingPhotoProcessing = processing
 
                 guard let windowScene = UIApplication.shared.connectedScenes
                     .compactMap({ $0 as? UIWindowScene })
@@ -126,6 +128,7 @@ enum CameraFunctions {
             let maxItems = parameters["maxItems"] as? Int ?? 10
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
+            let processing = ImageProcessingOptions.fromBridge(parameters["processing"])
 
             print("🖼️ Picking media with mediaType=\(mediaType), multiple=\(multiple), maxItems=\(maxItems), id=\(id ?? "nil"), event=\(event ?? "nil")")
 
@@ -135,7 +138,8 @@ enum CameraFunctions {
                     multiple: multiple,
                     maxItems: maxItems,
                     id: id,
-                    event: event
+                    event: event,
+                    processing: processing
                 )
             }
 
@@ -267,8 +271,18 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
 
     static let shared = CameraVideoDelegate()
 
-    var pendingVideoId: String?
-    var pendingVideoEvent: String?
+    private let stateLock = NSLock()
+    private var _pendingVideoId: String?
+    private var _pendingVideoEvent: String?
+
+    var pendingVideoId: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _pendingVideoId }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _pendingVideoId = newValue }
+    }
+    var pendingVideoEvent: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _pendingVideoEvent }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _pendingVideoEvent = newValue }
+    }
 
     // User captured a video
     func imagePickerController(_ picker: UIImagePickerController,
@@ -384,8 +398,23 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
 
     static let shared = CameraPhotoDelegate()
 
-    var pendingPhotoId: String?
-    var pendingPhotoEvent: String?
+    private let stateLock = NSLock()
+    private var _pendingPhotoId: String?
+    private var _pendingPhotoEvent: String?
+    private var _pendingPhotoProcessing = ImageProcessingOptions.fromBridge(nil)
+
+    var pendingPhotoId: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _pendingPhotoId }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _pendingPhotoId = newValue }
+    }
+    var pendingPhotoEvent: String? {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _pendingPhotoEvent }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _pendingPhotoEvent = newValue }
+    }
+    var pendingPhotoProcessing: ImageProcessingOptions {
+        get { stateLock.lock(); defer { stateLock.unlock() }; return _pendingPhotoProcessing }
+        set { stateLock.lock(); defer { stateLock.unlock() }; _pendingPhotoProcessing = newValue }
+    }
 
     // User captured a photo
     func imagePickerController(_ picker: UIImagePickerController,
@@ -409,47 +438,22 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             // Clean up
             pendingPhotoId = nil
             pendingPhotoEvent = nil
+            pendingPhotoProcessing = ImageProcessingOptions.fromBridge(nil)
             return
         }
 
         // Save on a background queue
         DispatchQueue.global(qos: .utility).async { [weak self] in
-            let fm = FileManager.default
-
-            // Use temporary directory
-            let tempDir = fm.temporaryDirectory
-
-            // Generate unique filename
-            let timestamp = Int(Date().timeIntervalSince1970 * 1000)
-            let filename = "captured_photo_\(timestamp).jpg"
-            var fileURL = tempDir.appendingPathComponent(filename)
-
             do {
-                // Remove existing file if present
-                if fm.fileExists(atPath: fileURL.path) {
-                    try fm.removeItem(at: fileURL)
-                }
-
-                // Convert to JPEG and save
-                guard let jpegData = image.jpegData(compressionQuality: 0.9) else {
-                    print("❌ Failed to convert image to JPEG")
-                    return
-                }
-
-                print("📸 Saving photo file...")
-                try jpegData.write(to: fileURL)
-                print("📸 Photo file saved successfully")
-
-                // Exclude from iCloud / iTunes backup
-                var resourceValues = URLResourceValues()
-                resourceValues.isExcludedFromBackup = true
-                try fileURL.setResourceValues(resourceValues)
+                let processed = try IOSImageProcessor.process(
+                    image: image,
+                    sourcePath: nil,
+                    options: self?.pendingPhotoProcessing ?? ImageProcessingOptions.fromBridge(nil),
+                    prefix: "captured_photo"
+                )
 
                 // Fire success event on main thread
-                var payload: [String: Any] = [
-                    "path": fileURL.path(percentEncoded: false),
-                    "mimeType": "image/jpeg"
-                ]
+                var payload = processed.payload
                 if let id = self?.pendingPhotoId {
                     payload["id"] = id
                 }
@@ -457,12 +461,19 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                 // Dispatch event with slight delay to ensure UI is ready
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
                     LaravelBridge.shared.send?(eventClass, payload)
-                    print("✅ Photo captured successfully: \(fileURL.path)")
+                    print("Photo captured successfully: \(processed.path)")
                 }
 
             } catch {
                 print("❌ Saving photo failed: \(error)")
-                var payload: [String: Any] = ["cancelled": true]
+                var payload: [String: Any] = [
+                    "cancelled": true,
+                    "error": [
+                        "code": "photo_processing_failed",
+                        "message": error.localizedDescription,
+                        "stage": "camera_photo"
+                    ]
+                ]
                 if let id = self?.pendingPhotoId {
                     payload["id"] = id
                 }
@@ -475,6 +486,7 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             // Clean up
             self?.pendingPhotoId = nil
             self?.pendingPhotoEvent = nil
+            self?.pendingPhotoProcessing = ImageProcessingOptions.fromBridge(nil)
         }
     }
 
@@ -496,6 +508,7 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         // Clean up
         pendingPhotoId = nil
         pendingPhotoEvent = nil
+        pendingPhotoProcessing = ImageProcessingOptions.fromBridge(nil)
     }
 }
 
@@ -506,11 +519,20 @@ final class CameraGalleryManager: NSObject {
 
     var pendingGalleryId: String?
     var pendingGalleryEvent: String?
+    var pendingGalleryProcessing = ImageProcessingOptions.fromBridge(nil)
 
-    func openGallery(mediaType: String, multiple: Bool, maxItems: Int, id: String? = nil, event: String? = nil) {
+    func openGallery(
+        mediaType: String,
+        multiple: Bool,
+        maxItems: Int,
+        id: String? = nil,
+        event: String? = nil,
+        processing: ImageProcessingOptions = ImageProcessingOptions.fromBridge(nil)
+    ) {
         // Store id and event for callback
         pendingGalleryId = id
         pendingGalleryEvent = event
+        pendingGalleryProcessing = processing
         guard let windowScene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }),
@@ -563,6 +585,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                 "success": false,
                 "files": [],
                 "count": 0,
+                "errors": [],
                 "cancelled": true
             ]
             if let id = pendingGalleryId {
@@ -574,6 +597,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
             // Clean up
             pendingGalleryId = nil
             pendingGalleryEvent = nil
+            pendingGalleryProcessing = ImageProcessingOptions.fromBridge(nil)
             return
         }
 
@@ -583,10 +607,13 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
     private func processPickerResults(_ results: [PHPickerResult]) {
         let group = DispatchGroup()
         var processedFiles: [[String: Any]] = []
+        var processingErrors: [[String: Any]] = []
+        let lock = NSLock()
 
         // Capture event class and id before async processing
         let eventClass = pendingGalleryEvent ?? "Native\\Mobile\\Events\\Gallery\\MediaSelected"
         let capturedId = pendingGalleryId
+        let processing = pendingGalleryProcessing
 
         for (index, result) in results.enumerated() {
             group.enter()
@@ -597,11 +624,29 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "image") { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "image", processing: processing) { fileInfo, errorInfo in
                             if let fileInfo = fileInfo {
+                                lock.lock()
                                 processedFiles.append(fileInfo)
+                                lock.unlock()
+                            } else {
+                                lock.lock()
+                                processingErrors.append(errorInfo ?? [
+                                    "index": index,
+                                    "code": "gallery_processing_failed",
+                                    "message": "Failed to process selected image"
+                                ])
+                                lock.unlock()
                             }
                         }
+                    } else {
+                        lock.lock()
+                        processingErrors.append([
+                            "index": index,
+                            "code": "gallery_processing_failed",
+                            "message": error?.localizedDescription ?? "Failed to load selected image"
+                        ])
+                        lock.unlock()
                     }
                 }
             } else if result.itemProvider.hasItemConformingToTypeIdentifier(UTType.movie.identifier) {
@@ -609,23 +654,49 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "video") { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "video", processing: processing) { fileInfo, errorInfo in
                             if let fileInfo = fileInfo {
+                                lock.lock()
                                 processedFiles.append(fileInfo)
+                                lock.unlock()
+                            } else {
+                                lock.lock()
+                                processingErrors.append(errorInfo ?? [
+                                    "index": index,
+                                    "code": "gallery_processing_failed",
+                                    "message": "Failed to process selected video"
+                                ])
+                                lock.unlock()
                             }
                         }
+                    } else {
+                        lock.lock()
+                        processingErrors.append([
+                            "index": index,
+                            "code": "gallery_processing_failed",
+                            "message": error?.localizedDescription ?? "Failed to load selected video"
+                        ])
+                        lock.unlock()
                     }
                 }
             } else {
+                lock.lock()
+                processingErrors.append([
+                    "index": index,
+                    "code": "unsupported_media_type",
+                    "message": "Selected media type is not supported"
+                ])
+                lock.unlock()
                 group.leave()
             }
         }
 
         group.notify(queue: .main) { [weak self] in
             var payload: [String: Any] = [
-                "success": true,
+                "success": !processedFiles.isEmpty,
                 "files": processedFiles,
-                "count": processedFiles.count
+                "count": processedFiles.count,
+                "errors": processingErrors
             ]
             if let id = capturedId {
                 payload["id"] = id
@@ -636,10 +707,17 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
             // Clean up
             self?.pendingGalleryId = nil
             self?.pendingGalleryEvent = nil
+            self?.pendingGalleryProcessing = ImageProcessingOptions.fromBridge(nil)
         }
     }
 
-    private func copyFileToCache(url: URL, index: Int, type: String, completion: @escaping ([String: Any]?) -> Void) {
+    private func copyFileToCache(
+        url: URL,
+        index: Int,
+        type: String,
+        processing: ImageProcessingOptions,
+        completion: @escaping ([String: Any]?, [String: Any]?) -> Void
+    ) {
         let fileManager = FileManager.default
 
         // Use temporary directory with Gallery subfolder
@@ -651,7 +729,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
 
         let timestamp = Int(Date().timeIntervalSince1970 * 1000)
         let fileExtension = url.pathExtension.isEmpty ? (type == "image" ? "jpg" : "mp4") : url.pathExtension
-        let fileName = "gallery_selected_\(timestamp)_\(index).\(fileExtension)"
+        let fileName = "gallery_selected_\(timestamp)_\(index)_source.\(fileExtension)"
         let destinationURL = galleryDir.appendingPathComponent(fileName)
 
         do {
@@ -661,17 +739,36 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
 
             try fileManager.copyItem(at: url, to: destinationURL)
 
-            let fileInfo: [String: Any] = [
-                "path": destinationURL.path,
-                "mimeType": getMimeType(for: fileExtension),
-                "extension": fileExtension,
-                "type": type
-            ]
+            let fileInfo: [String: Any]
+            if type == "image" {
+                let processed = try IOSImageProcessor.process(
+                    fileURL: destinationURL,
+                    options: processing,
+                    prefix: "gallery_processed_\(index)"
+                )
 
-            completion(fileInfo)
+                try? fileManager.removeItem(at: destinationURL)
+                fileInfo = processed.payload
+            } else {
+                fileInfo = [
+                    "path": destinationURL.path,
+                    "sourcePath": destinationURL.path,
+                    "mimeType": getMimeType(for: fileExtension),
+                    "extension": fileExtension,
+                    "type": type,
+                    "bytes": (try? fileManager.attributesOfItem(atPath: destinationURL.path)[.size] as? Int64) ?? 0,
+                    "processed": false
+                ]
+            }
+
+            completion(fileInfo, nil)
         } catch {
             print("Error copying file: \(error)")
-            completion(nil)
+            completion(nil, [
+                "index": index,
+                "code": "gallery_processing_failed",
+                "message": error.localizedDescription
+            ])
         }
     }
 

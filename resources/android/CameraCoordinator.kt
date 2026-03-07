@@ -53,6 +53,7 @@ class CameraCoordinator : Fragment() {
     private var pendingCameraUri: Uri? = null
     private var pendingPhotoId: String? = null
     private var pendingPhotoEvent: String? = null
+    private var pendingPhotoProcessing = ImageProcessingOptions.fromBridgeInput(null)
     private var pendingCameraOperation: String? = null
 
     // Video state
@@ -66,6 +67,7 @@ class CameraCoordinator : Fragment() {
     // Gallery state
     private var pendingGalleryId: String? = null
     private var pendingGalleryEvent: String? = null
+    private var pendingGalleryProcessing = ImageProcessingOptions.fromBridgeInput(null)
 
     // Background processing
     private var fileProcessingExecutor: ExecutorService? = null
@@ -161,11 +163,11 @@ class CameraCoordinator : Fragment() {
             val cancelEventClass = "Native\\Mobile\\Events\\Camera\\PhotoCancelled"
 
             if (success && pendingCameraUri != null) {
-                val dst = File(context.cacheDir, "captured_${System.currentTimeMillis()}.jpg")
+                val sourceFile = File(context.cacheDir, "captured_source_${System.currentTimeMillis()}.jpg")
 
                 try {
                     context.contentResolver.openInputStream(pendingCameraUri!!)?.use { input ->
-                        dst.outputStream().buffered(64 * 1024).use { output ->
+                        sourceFile.outputStream().buffered(64 * 1024).use { output ->
                             input.copyTo(output)
                         }
                     }
@@ -176,20 +178,34 @@ class CameraCoordinator : Fragment() {
                         Log.w(TAG, "⚠️ Could not delete MediaStore entry: ${e.message}")
                     }
 
-                    val payload = JSONObject().apply {
-                        put("path", dst.absolutePath)
-                        put("mimeType", "image/jpeg")
+                    val processed = ImageProcessor.processImageFile(
+                        context = context,
+                        sourceFile = sourceFile,
+                        options = pendingPhotoProcessing,
+                        outputPrefix = "captured_photo"
+                    )
+
+                    sourceFile.delete()
+
+                    val payload = ImageProcessor.toJson(processed).apply {
                         pendingPhotoId?.let { put("id", it) }
                     }
 
                     dispatchEvent(eventClass, payload.toString())
-                    Log.d(TAG, "✅ Photo captured successfully: ${dst.absolutePath}")
+                    Log.d(TAG, "Photo captured and processed successfully: ${processed.path}")
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Error processing camera photo: ${e.message}", e)
                     Toast.makeText(context, "Failed to save photo", Toast.LENGTH_SHORT).show()
 
+                    sourceFile.delete()
+
                     val payload = JSONObject().apply {
                         put("cancelled", true)
+                        put("error", JSONObject().apply {
+                            put("code", "photo_processing_failed")
+                            put("message", e.message ?: "Failed to process camera photo")
+                            put("stage", "camera_photo")
+                        })
                         pendingPhotoId?.let { put("id", it) }
                     }
                     dispatchEvent(cancelEventClass, payload.toString())
@@ -207,6 +223,7 @@ class CameraCoordinator : Fragment() {
             pendingCameraUri = null
             pendingPhotoId = null
             pendingPhotoEvent = null
+            pendingPhotoProcessing = ImageProcessingOptions.fromBridgeInput(null)
         }
 
         // Video recorder launcher
@@ -294,6 +311,8 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val requestId = pendingGalleryId
+            val processing = pendingGalleryProcessing
 
             if (uri != null) {
                 Log.d(TAG, "✅ Single gallery picker - URI received successfully")
@@ -306,6 +325,7 @@ class CameraCoordinator : Fragment() {
                 // Process file using executor service to prevent unbounded thread creation
                 fileProcessingExecutor?.execute {
                     try {
+                        if (!isAdded) return@execute
                         val context = requireContext()
                         val timestamp = System.currentTimeMillis()
 
@@ -313,21 +333,29 @@ class CameraCoordinator : Fragment() {
                         val galleryDir = File(context.cacheDir, "Gallery")
                         galleryDir.mkdirs()
 
-                        val dst = File(galleryDir, "gallery_selected_$timestamp")
+                        val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                        val extension = extensionFromMimeType(mimeType)
+                        val sourceFile = File(galleryDir, "gallery_selected_${timestamp}_source.$extension")
 
                         Log.d(TAG, "🧵 Background copying file to cache")
 
                         // Use buffered streams with 64KB buffer for better performance
                         context.contentResolver.openInputStream(uri)?.use { input ->
-                            dst.outputStream().buffered(64 * 1024).use { output ->
+                            sourceFile.outputStream().buffered(64 * 1024).use { output ->
                                 input.copyTo(output)
                             }
                         }
 
                         Log.d(TAG, "✅ File copied successfully")
 
-                        // Get file metadata
-                        val fileMetadata = getFileMetadata(uri, dst.absolutePath)
+                        // Process image files, pass through non-image media as-is.
+                        val fileMetadata = buildGalleryFileMetadata(
+                            context = context,
+                            sourceFile = sourceFile,
+                            mimeType = mimeType,
+                            fileIndex = 0,
+                            processing = processing
+                        )
                         val filesArray = JSONArray()
                         filesArray.put(fileMetadata)
 
@@ -335,7 +363,8 @@ class CameraCoordinator : Fragment() {
                             put("success", true)
                             put("files", filesArray)
                             put("count", 1)
-                            pendingGalleryId?.let { put("id", it) }
+                            put("errors", JSONArray())
+                            requestId?.let { put("id", it) }
                         }
 
                         // Dispatch on main thread
@@ -352,7 +381,13 @@ class CameraCoordinator : Fragment() {
                                 put("success", false)
                                 put("files", JSONArray())
                                 put("count", 0)
+                                put("errors", JSONArray().put(JSONObject().apply {
+                                    put("index", 0)
+                                    put("code", "gallery_processing_failed")
+                                    put("message", e.message ?: "Failed to process selected file")
+                                }))
                                 put("error", "Failed to process file: ${e.message}")
+                                requestId?.let { put("id", it) }
                             }
                             dispatchEvent("Native\\Mobile\\Events\\Gallery\\MediaSelected", payload.toString())
                         }
@@ -366,6 +401,7 @@ class CameraCoordinator : Fragment() {
                     put("success", false)
                     put("files", JSONArray())
                     put("count", 0)
+                    put("errors", JSONArray())
                     put("cancelled", true)
                     pendingGalleryId?.let { put("id", it) }
                 }
@@ -378,6 +414,7 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingGalleryProcessing = ImageProcessingOptions.fromBridgeInput(null)
         }
 
         // Multiple gallery picker
@@ -394,6 +431,8 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val requestId = pendingGalleryId
+            val processing = pendingGalleryProcessing
 
             if (uris.isNotEmpty()) {
                 Log.d(TAG, "📁 Processing ${uris.size} files - moving to background thread")
@@ -401,8 +440,10 @@ class CameraCoordinator : Fragment() {
                 // Process files using executor service to prevent unbounded thread creation
                 fileProcessingExecutor?.execute {
                     try {
+                        if (!isAdded) return@execute
                         val context = requireContext()
                         val filesArray = JSONArray()
+                        val errorsArray = JSONArray()
                         val timestamp = System.currentTimeMillis()
 
                         Log.d(TAG, "🧵 Background processing ${uris.size} files")
@@ -417,27 +458,44 @@ class CameraCoordinator : Fragment() {
                                 Log.d(TAG, "📂 Processing file ${index + 1}/${uris.size}")
                             }
 
-                            val dst = File(galleryDir, "gallery_selected_${timestamp}_$index")
+                            val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                            val extension = extensionFromMimeType(mimeType)
+                            val sourceFile = File(galleryDir, "gallery_selected_${timestamp}_${index}_source.$extension")
 
                             // Use buffered streams with 64KB buffer for better performance
                             context.contentResolver.openInputStream(uri)?.use { input ->
-                                dst.outputStream().buffered(64 * 1024).use { output ->
+                                sourceFile.outputStream().buffered(64 * 1024).use { output ->
                                     input.copyTo(output)
                                 }
                             }
 
-                            // Get file metadata and add to array
-                            val fileMetadata = getFileMetadata(uri, dst.absolutePath)
-                            filesArray.put(fileMetadata)
+                            try {
+                                val fileMetadata = buildGalleryFileMetadata(
+                                    context = context,
+                                    sourceFile = sourceFile,
+                                    mimeType = mimeType,
+                                    fileIndex = index,
+                                    processing = processing
+                                )
+                                filesArray.put(fileMetadata)
+                            } catch (e: Exception) {
+                                errorsArray.put(JSONObject().apply {
+                                    put("index", index)
+                                    put("code", "gallery_processing_failed")
+                                    put("message", e.message ?: "Failed to process gallery item")
+                                })
+                                sourceFile.delete()
+                            }
                         }
 
                         Log.d(TAG, "✅ All ${uris.size} files processed successfully")
 
                         val payload = JSONObject().apply {
-                            put("success", true)
+                            put("success", filesArray.length() > 0)
                             put("files", filesArray)
-                            put("count", uris.size)
-                            pendingGalleryId?.let { put("id", it) }
+                            put("count", filesArray.length())
+                            put("errors", errorsArray)
+                            requestId?.let { put("id", it) }
                         }
 
                         // Dispatch on main thread
@@ -454,8 +512,9 @@ class CameraCoordinator : Fragment() {
                                 put("success", false)
                                 put("files", JSONArray())
                                 put("count", 0)
+                                put("errors", JSONArray())
                                 put("error", "Failed to process files: ${e.message}")
-                                pendingGalleryId?.let { put("id", it) }
+                                requestId?.let { put("id", it) }
                             }
                             dispatchEvent(eventClass, payload.toString())
                         }
@@ -467,6 +526,7 @@ class CameraCoordinator : Fragment() {
                     put("success", false)
                     put("files", JSONArray())
                     put("count", 0)
+                    put("errors", JSONArray())
                     put("cancelled", true)
                     pendingGalleryId?.let { put("id", it) }
                 }
@@ -476,6 +536,7 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingGalleryProcessing = ImageProcessingOptions.fromBridgeInput(null)
         }
     }
 
@@ -493,13 +554,18 @@ class CameraCoordinator : Fragment() {
         Log.d(TAG, "🧹 Fragment destroyed and resources cleaned up")
     }
 
-    fun launchCamera(id: String? = null, event: String? = null) {
+    fun launchCamera(
+        id: String? = null,
+        event: String? = null,
+        processing: ImageProcessingOptions = ImageProcessingOptions.fromBridgeInput(null)
+    ) {
         val context = requireContext()
 
         Log.d(TAG, "📸 launchCamera called - id=$id, event=$event")
 
         pendingPhotoId = id
         pendingPhotoEvent = event
+        pendingPhotoProcessing = processing
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -611,11 +677,19 @@ class CameraCoordinator : Fragment() {
         videoRecorderLauncher.launch(intent)
     }
 
-    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null) {
+    fun launchGallery(
+        mediaType: String,
+        multiple: Boolean,
+        maxItems: Int,
+        id: String? = null,
+        event: String? = null,
+        processing: ImageProcessingOptions = ImageProcessingOptions.fromBridgeInput(null)
+    ) {
         Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event")
 
         pendingGalleryId = id
         pendingGalleryEvent = event
+        pendingGalleryProcessing = processing
 
         val visualMediaType = when (mediaType.lowercase()) {
             "image", "images" -> ActivityResultContracts.PickVisualMedia.ImageOnly
@@ -680,59 +754,60 @@ class CameraCoordinator : Fragment() {
         return null
     }
 
-    private fun getFileMetadata(uri: Uri, cachePath: String): JSONObject {
-        val context = requireContext()
-        val metadata = JSONObject()
-
-        try {
-            // Get MIME type
-            val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
-
-            // Determine file extension from MIME type
-            val extension = when {
-                mimeType.startsWith("image/jpeg") -> "jpg"
-                mimeType.startsWith("image/png") -> "png"
-                mimeType.startsWith("image/gif") -> "gif"
-                mimeType.startsWith("image/webp") -> "webp"
-                mimeType.startsWith("video/mp4") -> "mp4"
-                mimeType.startsWith("video/avi") -> "avi"
-                mimeType.startsWith("video/mov") -> "mov"
-                mimeType.startsWith("video/3gp") -> "3gp"
-                mimeType.startsWith("video/webm") -> "webm"
-                else -> {
-                    // Try to extract from MIME type
-                    val parts = mimeType.split("/")
-                    if (parts.size == 2) parts[1] else "bin"
-                }
-            }
-
-            // Determine file type category
-            val type = when {
-                mimeType.startsWith("image/") -> "image"
-                mimeType.startsWith("video/") -> "video"
-                mimeType.startsWith("audio/") -> "audio"
-                else -> "other"
-            }
-
-            metadata.apply {
-                put("path", cachePath)
+    private fun buildGalleryFileMetadata(
+        context: Context,
+        sourceFile: File,
+        mimeType: String,
+        fileIndex: Int,
+        processing: ImageProcessingOptions
+    ): JSONObject {
+        return if (mimeType.startsWith("image/")) {
+            val processed = ImageProcessor.processImageFile(
+                context = context,
+                sourceFile = sourceFile,
+                options = processing,
+                outputPrefix = "gallery_processed_$fileIndex"
+            )
+            sourceFile.delete()
+            ImageProcessor.toJson(processed)
+        } else {
+            JSONObject().apply {
+                put("path", sourceFile.absolutePath)
+                put("sourcePath", sourceFile.absolutePath)
                 put("mimeType", mimeType)
-                put("extension", extension)
-                put("type", type)
-            }
-
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ Error getting file metadata", e)
-            // Fallback metadata
-            metadata.apply {
-                put("path", cachePath)
-                put("mimeType", "application/octet-stream")
-                put("extension", "bin")
-                put("type", "other")
+                put("extension", extensionFromMimeType(mimeType))
+                put("type", typeFromMimeType(mimeType))
+                put("bytes", sourceFile.length())
+                put("processed", false)
             }
         }
+    }
 
-        return metadata
+    private fun extensionFromMimeType(mimeType: String): String {
+        return when {
+            mimeType.startsWith("image/jpeg") -> "jpg"
+            mimeType.startsWith("image/png") -> "png"
+            mimeType.startsWith("image/gif") -> "gif"
+            mimeType.startsWith("image/webp") -> "webp"
+            mimeType.startsWith("video/mp4") -> "mp4"
+            mimeType.startsWith("video/avi") -> "avi"
+            mimeType.startsWith("video/mov") -> "mov"
+            mimeType.startsWith("video/3gp") -> "3gp"
+            mimeType.startsWith("video/webm") -> "webm"
+            else -> {
+                val parts = mimeType.split("/")
+                if (parts.size == 2) parts[1] else "bin"
+            }
+        }
+    }
+
+    private fun typeFromMimeType(mimeType: String): String {
+        return when {
+            mimeType.startsWith("image/") -> "image"
+            mimeType.startsWith("video/") -> "video"
+            mimeType.startsWith("audio/") -> "audio"
+            else -> "other"
+        }
     }
 
     private fun dispatchEvent(event: String, payloadJson: String) {
