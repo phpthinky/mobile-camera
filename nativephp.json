@@ -23,12 +23,12 @@
     ],
 
     "android": {
-        "min_version": 33,
+        "min_version": 26,
         "permissions": [
             "android.permission.CAMERA",
             "android.permission.RECORD_AUDIO",
             "android.permission.FOREGROUND_SERVICE",
-            "android.permission.FOREGROUND_SERVICE_SHORT_SERVICE"
+            "android.permission.FOREGROUND_SERVICE_CAMERA"
         ],
         "dependencies": {
             "implementation": []
@@ -36,7 +36,7 @@
         "services": [
             {
                 "name": ".CameraForegroundService",
-                "foregroundServiceType": "shortService",
+                "foregroundServiceType": "camera",
                 "exported": false
             }
         ]
