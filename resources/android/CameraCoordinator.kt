@@ -168,27 +168,49 @@ class CameraCoordinator : Fragment() {
             val cancelEventClass = "Native\\Mobile\\Events\\Camera\\PhotoCancelled"
 
             if (success && pendingCameraUri != null) {
-                val dst = File(context.filesDir, "captured_${System.currentTimeMillis()}.jpg")
-
                 try {
-                    context.contentResolver.openInputStream(pendingCameraUri!!)?.use { input ->
-                        dst.outputStream().buffered(64 * 1024).use { output ->
-                            input.copyTo(output)
+                    // Resolve the actual file path from the MediaStore URI so the event path
+                    // matches the file that was saved to the gallery (DCIM/Camera/...).
+                    val actualPath = getPhotoPathFromUri(pendingCameraUri!!)
+
+                    if (actualPath != null) {
+                        val file = File(actualPath)
+
+                        // Apply watermark in-place on the gallery file if requested
+                        pendingWatermarkOptions?.let { options ->
+                            applyWatermarkToFile(file, options)
                         }
-                    }
-                    // Apply watermark if requested
-                    pendingWatermarkOptions?.let { options ->
-                        applyWatermarkToFile(dst, options)
-                    }
 
-                    val payload = JSONObject().apply {
-                        put("path", dst.absolutePath)
-                        put("mimeType", "image/jpeg")
-                        pendingPhotoId?.let { put("id", it) }
-                    }
+                        val payload = JSONObject().apply {
+                            put("path", actualPath)
+                            put("mimeType", "image/jpeg")
+                            pendingPhotoId?.let { put("id", it) }
+                        }
 
-                    dispatchEvent(eventClass, payload.toString())
-                    Log.d(TAG, "✅ Photo captured successfully: ${dst.absolutePath}")
+                        dispatchEvent(eventClass, payload.toString())
+                        Log.d(TAG, "✅ Photo captured successfully: $actualPath")
+                    } else {
+                        // Fallback: copy from URI to persistent app storage
+                        Log.w(TAG, "⚠️ Could not resolve MediaStore path, falling back to copy")
+                        val dst = File(context.filesDir, "captured_${System.currentTimeMillis()}.jpg")
+                        context.contentResolver.openInputStream(pendingCameraUri!!)?.use { input ->
+                            dst.outputStream().buffered(64 * 1024).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        pendingWatermarkOptions?.let { options ->
+                            applyWatermarkToFile(dst, options)
+                        }
+
+                        val payload = JSONObject().apply {
+                            put("path", dst.absolutePath)
+                            put("mimeType", "image/jpeg")
+                            pendingPhotoId?.let { put("id", it) }
+                        }
+
+                        dispatchEvent(eventClass, payload.toString())
+                        Log.d(TAG, "✅ Photo captured (fallback copy): ${dst.absolutePath}")
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Error processing camera photo: ${e.message}", e)
                     Toast.makeText(context, "Failed to save photo", Toast.LENGTH_SHORT).show()
@@ -702,6 +724,22 @@ class CameraCoordinator : Fragment() {
             } catch (e: Exception) {
                 Log.w(TAG, "⚠️ Could not delete video URI: ${e.message}")
             }
+        }
+    }
+
+    private fun getPhotoPathFromUri(uri: Uri): String? {
+        val context = requireContext()
+        val projection = arrayOf(MediaStore.Images.Media.DATA)
+        return try {
+            context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val columnIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                    if (columnIndex != -1) cursor.getString(columnIndex) else null
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Could not query MediaStore path: ${e.message}")
+            null
         }
     }
 
