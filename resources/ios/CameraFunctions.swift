@@ -307,14 +307,15 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let fm = FileManager.default
 
-            // Use temporary directory
-            let tempDir = fm.temporaryDirectory
+            // Use persistent application support directory
+            let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+            try? fm.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
 
             // Generate unique filename
             let timestamp = Int(Date().timeIntervalSince1970 * 1000)
             let fileExtension = videoURL.pathExtension.isEmpty ? "mp4" : videoURL.pathExtension
             let filename = "captured_video_\(timestamp).\(fileExtension)"
-            var fileURL = tempDir.appendingPathComponent(filename)
+            var fileURL = appSupportDir.appendingPathComponent(filename)
 
             do {
                 // Remove existing file if present
@@ -427,13 +428,14 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let fm = FileManager.default
 
-            // Use temporary directory
-            let tempDir = fm.temporaryDirectory
+            // Use persistent application support directory
+            let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+            try? fm.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
 
             // Generate unique filename
             let timestamp = Int(Date().timeIntervalSince1970 * 1000)
             let filename = "captured_photo_\(timestamp).jpg"
-            var fileURL = tempDir.appendingPathComponent(filename)
+            var fileURL = appSupportDir.appendingPathComponent(filename)
 
             do {
                 // Remove existing file if present
@@ -721,9 +723,9 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
     private func copyFileToCache(url: URL, index: Int, type: String, completion: @escaping ([String: Any]?) -> Void) {
         let fileManager = FileManager.default
 
-        // Use temporary directory with Gallery subfolder
-        let tempDir = fileManager.temporaryDirectory
-        let galleryDir = tempDir.appendingPathComponent("Gallery", isDirectory: true)
+        // Use persistent application support directory with Gallery subfolder
+        let appSupportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fileManager.temporaryDirectory
+        let galleryDir = appSupportDir.appendingPathComponent("Gallery", isDirectory: true)
 
         // Ensure Gallery directory exists
         try? fileManager.createDirectory(at: galleryDir, withIntermediateDirectories: true)
