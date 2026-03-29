@@ -168,7 +168,7 @@ class CameraCoordinator : Fragment() {
             val cancelEventClass = "Native\\Mobile\\Events\\Camera\\PhotoCancelled"
 
             if (success && pendingCameraUri != null) {
-                val dst = File(context.cacheDir, "captured_${System.currentTimeMillis()}.jpg")
+                val dst = File(context.filesDir, "captured_${System.currentTimeMillis()}.jpg")
 
                 try {
                     context.contentResolver.openInputStream(pendingCameraUri!!)?.use { input ->
@@ -316,7 +316,7 @@ class CameraCoordinator : Fragment() {
                         val timestamp = System.currentTimeMillis()
 
                         // Use Gallery subfolder in cache directory
-                        val galleryDir = File(context.cacheDir, "Gallery")
+                        val galleryDir = File(context.filesDir, "Gallery")
                         galleryDir.mkdirs()
 
                         // Resolve extension before creating the destination file so the path
@@ -429,7 +429,7 @@ class CameraCoordinator : Fragment() {
                         Log.d(TAG, "🧵 Background processing ${uris.size} files")
 
                         // Use Gallery subfolder in cache directory
-                        val galleryDir = File(context.cacheDir, "Gallery")
+                        val galleryDir = File(context.filesDir, "Gallery")
                         galleryDir.mkdirs()
 
                         uris.forEachIndexed { index, uri ->
@@ -710,7 +710,7 @@ class CameraCoordinator : Fragment() {
 
         try {
             val timestamp = System.currentTimeMillis()
-            val cacheFile = File(context.cacheDir, "video_$timestamp.mp4")
+            val cacheFile = File(context.filesDir, "video_$timestamp.mp4")
 
             context.contentResolver.openInputStream(uri)?.use { input ->
                 cacheFile.outputStream().buffered(64 * 1024).use { output ->
