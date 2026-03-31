@@ -4,7 +4,7 @@ Camera plugin for NativePHP Mobile providing photo capture, video recording, and
 
 ## Overview
 
-The Camera API provides access to the device's camera for taking photos, recording videos, and selecting media from the gallery.
+The Camera API provides access to the device's camera for taking photos, recording videos, and selecting media from the gallery. Every event payload includes a `fileUri` (a `file://` URI suitable for use in `<img>` tags and web views) and supports an optional `includeBase64` flag that adds a data URI string to the payload — useful for canvas-based colour analysis, such as extracting a hex colour from a captured soil sample.
 
 ## Installation
 
@@ -75,6 +75,13 @@ await Camera.pickImages()
 
 Fired when a photo is taken with the camera.
 
+**Payload:**
+- `string $path` — Absolute file path to the captured photo
+- `string $fileUri` — `file://` URI, ready for use in `<img src>` or a web view
+- `string $mimeType` — Always `image/jpeg`
+- `?string $id` — Optional identifier if set via `id()`
+- `?string $base64` — Data URI string (`data:image/jpeg;base64,...`) — only present when `includeBase64` is `true`
+
 #### PHP
 
 ```php
@@ -82,9 +89,10 @@ use Native\Mobile\Attributes\OnNative;
 use Native\Mobile\Events\Camera\PhotoTaken;
 
 #[OnNative(PhotoTaken::class)]
-public function handlePhotoTaken(string $path)
+public function handlePhotoTaken(string $path, string $fileUri)
 {
-    // Process the captured photo
+    // Use $path for server-side file operations
+    // Use $fileUri to render a preview in a web view
     $this->processPhoto($path);
 }
 ```
@@ -96,10 +104,11 @@ import { On, Off, Events } from '#nativephp';
 import { ref, onMounted, onUnmounted } from 'vue';
 
 const photoPath = ref('');
+const fileUri   = ref('');
 
 const handlePhotoTaken = (payload) => {
     photoPath.value = payload.path;
-    processPhoto(payload.path);
+    fileUri.value   = payload.fileUri; // use as <img :src="fileUri">
 };
 
 onMounted(() => {
@@ -116,9 +125,11 @@ onUnmounted(() => {
 Fired when a video is successfully recorded.
 
 **Payload:**
-- `string $path` - File path to the recorded video
-- `string $mimeType` - Video MIME type (default: `'video/mp4'`)
-- `?string $id` - Optional identifier if set via `id()` method
+- `string $path` — Absolute file path to the recorded video
+- `string $fileUri` — `file://` URI for use in `<video src>`
+- `string $mimeType` — Video MIME type (default: `video/mp4`)
+- `?string $id` — Optional identifier if set via `id()`
+- `?string $base64` — Data URI string — only present when `includeBase64` is `true`
 
 ### `VideoCancelled`
 
@@ -128,6 +139,18 @@ Fired when video recording is cancelled by the user.
 
 Fired when media is selected from the gallery.
 
+**Payload:**
+- `bool $success`
+- `int $count`
+- `array $files` — Array of file objects, each containing:
+  - `string path` — Absolute file path
+  - `string fileUri` — `file://` URI for use in `<img>` / `<video>`
+  - `string mimeType`
+  - `string extension`
+  - `string type` — `image` or `video`
+  - `?string base64` — Data URI string — only present when `includeBase64` is `true`
+- `?string $id` — Optional identifier if set
+
 ```php
 use Native\Mobile\Attributes\OnNative;
 use Native\Mobile\Events\Gallery\MediaSelected;
@@ -136,9 +159,82 @@ use Native\Mobile\Events\Gallery\MediaSelected;
 public function handleMediaSelected($success, $files, $count)
 {
     foreach ($files as $file) {
+        // $file['fileUri'] can be rendered in a web view immediately
         $this->processMedia($file);
     }
 }
+```
+
+## Image Preview
+
+Every payload includes a `fileUri` field that is a standard `file://` URI. Use it directly as an image source in your web view:
+
+```html
+<img :src="payload.fileUri" alt="Captured photo" />
+```
+
+```js
+const handlePhotoTaken = (payload) => {
+    document.getElementById('preview').src = payload.fileUri;
+};
+```
+
+## Base64 / Colour Extraction
+
+Pass `includeBase64: true` to receive a `base64` data URI alongside the file path. This is the recommended approach for canvas-based colour analysis (e.g. extracting a hex colour value from a soil sample photo) since it avoids any cross-origin or file-access restrictions on the canvas.
+
+### PHP / Livewire
+
+```php
+Camera::getPhoto(['includeBase64' => true]);
+```
+
+### JavaScript
+
+```js
+await Camera.getPhoto()
+    .id('soil-sample')
+    .includeBase64(true);
+```
+
+### Handling the base64 payload
+
+```js
+const handlePhotoTaken = (payload) => {
+    if (!payload.base64) return;
+
+    const img = new Image();
+    img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width  = 1;
+        canvas.height = 1;
+        const ctx = canvas.getContext('2d');
+
+        // Sample the centre pixel
+        ctx.drawImage(img, Math.floor(img.width / 2), Math.floor(img.height / 2), 1, 1, 0, 0, 1, 1);
+        const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
+        const hex = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
+        console.log('Soil colour:', hex);
+    };
+    img.src = payload.base64;
+};
+```
+
+> **Note:** `includeBase64` is opt-in and defaults to `false`. Omit it (or set it to `false`) for normal photo/video capture — the base64 string for a full-resolution image can be several megabytes and will noticeably increase event payload size.
+
+## Gallery with base64
+
+```js
+await Camera.pickImages()
+    .images()
+    .includeBase64(true);
+
+On(Events.Gallery.MediaSelected, (payload) => {
+    payload.files.forEach((file) => {
+        console.log(file.fileUri);   // file:// URI for <img src>
+        console.log(file.base64);    // data URI for canvas
+    });
+});
 ```
 
 ## PendingVideoRecorder API
@@ -159,6 +255,10 @@ Set a custom event class to dispatch when recording completes.
 
 Store the recorder's ID in the session for later retrieval.
 
+### `includeBase64(bool $include)`
+
+When `true`, the `VideoRecorded` event payload will include a `base64` data URI of the recorded video. Defaults to `false`.
+
 ### `start()`
 
 Explicitly start the video recording.
@@ -166,16 +266,22 @@ Explicitly start the video recording.
 ## Storage Locations
 
 **Photos:**
-- **Android:** App cache directory at `{cache}/captured.jpg`
-- **iOS:** Application Support at `~/Library/Application Support/Photos/captured.jpg`
+- **Android:** DCIM/Camera (visible in Gallery); falls back to app cache at `{filesDir}/captured_*.jpg`
+- **iOS:** Application Support at `~/Library/Application Support/captured_photo_*.jpg`
 
 **Videos:**
-- **Android:** App cache directory at `{cache}/video_{timestamp}.mp4`
-- **iOS:** Application Support at `~/Library/Application Support/Videos/captured_video_{timestamp}.mp4`
+- **Android:** App cache directory at `{filesDir}/video_*.mp4`
+- **iOS:** Application Support at `~/Library/Application Support/captured_video_*.mp4`
+
+**Gallery picks:**
+- **Android:** `{filesDir}/Gallery/gallery_selected_*.{ext}`
+- **iOS:** `~/Library/Application Support/Gallery/gallery_selected_*.{ext}`
 
 ## Notes
 
 - **Permissions:** You must enable the `camera` permission in `config/nativephp.php` to use camera features
-- If permission is denied, camera functions will fail silently
+- If permission is denied, camera functions will dispatch a `PermissionDenied` event
 - Camera permission is required for photos, videos, AND QR/barcode scanning
 - File formats: JPEG for photos, MP4 for videos
+- `fileUri` is always included in every event payload at no extra cost
+- `base64` is opt-in via `includeBase64: true` — avoid enabling it by default for large media files

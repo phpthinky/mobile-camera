@@ -33,8 +33,9 @@ enum CameraFunctions {
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
             let watermark = parameters["watermark"] as? [String: Any]
+            let includeBase64 = parameters["includeBase64"] as? Bool ?? false
 
-            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil)")
+            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil), includeBase64=\(includeBase64)")
 
             // Helper to fire permission denied event
             func firePermissionDenied() {
@@ -50,14 +51,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentPhotoPicker(id: id, event: event, watermark: watermark)
+                presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentPhotoPicker(id: id, event: event, watermark: watermark)
+                            self.presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -81,12 +82,13 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?) {
+        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?, includeBase64: Bool = false) {
             DispatchQueue.main.async {
                 // Set id, event and watermark on delegate before presenting picker
                 CameraPhotoDelegate.shared.pendingPhotoId = id
                 CameraPhotoDelegate.shared.pendingPhotoEvent = event
                 CameraPhotoDelegate.shared.pendingWatermarkOptions = watermark
+                CameraPhotoDelegate.shared.pendingIncludeBase64 = includeBase64
 
                 guard let windowScene = UIApplication.shared.connectedScenes
                     .compactMap({ $0 as? UIWindowScene })
@@ -134,8 +136,9 @@ enum CameraFunctions {
             let maxItems = parameters["maxItems"] as? Int ?? 10
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
+            let includeBase64 = parameters["includeBase64"] as? Bool ?? false
 
-            print("🖼️ Picking media with mediaType=\(mediaType), multiple=\(multiple), maxItems=\(maxItems), id=\(id ?? "nil"), event=\(event ?? "nil")")
+            print("🖼️ Picking media with mediaType=\(mediaType), multiple=\(multiple), maxItems=\(maxItems), id=\(id ?? "nil"), event=\(event ?? "nil"), includeBase64=\(includeBase64)")
 
             DispatchQueue.main.async {
                 CameraGalleryManager.shared.openGallery(
@@ -143,7 +146,8 @@ enum CameraFunctions {
                     multiple: multiple,
                     maxItems: maxItems,
                     id: id,
-                    event: event
+                    event: event,
+                    includeBase64: includeBase64
                 )
             }
 
@@ -169,8 +173,9 @@ enum CameraFunctions {
             let maxDuration = parameters["maxDuration"] as? Int
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
+            let includeBase64 = parameters["includeBase64"] as? Bool ?? false
 
-            print("🎥 Recording video with maxDuration=\(maxDuration ?? 0), id=\(id ?? "nil"), event=\(event ?? "nil")")
+            print("🎥 Recording video with maxDuration=\(maxDuration ?? 0), id=\(id ?? "nil"), event=\(event ?? "nil"), includeBase64=\(includeBase64)")
 
             // Helper to fire permission denied event
             func firePermissionDenied() {
@@ -186,14 +191,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentVideoPicker(maxDuration: maxDuration, id: id, event: event)
+                presentVideoPicker(maxDuration: maxDuration, id: id, event: event, includeBase64: includeBase64)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentVideoPicker(maxDuration: maxDuration, id: id, event: event)
+                            self.presentVideoPicker(maxDuration: maxDuration, id: id, event: event, includeBase64: includeBase64)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -217,11 +222,12 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentVideoPicker(maxDuration: Int?, id: String?, event: String?) {
+        private func presentVideoPicker(maxDuration: Int?, id: String?, event: String?, includeBase64: Bool = false) {
             DispatchQueue.main.async {
                 // Set id and event on delegate before presenting picker
                 CameraVideoDelegate.shared.pendingVideoId = id
                 CameraVideoDelegate.shared.pendingVideoEvent = event
+                CameraVideoDelegate.shared.pendingIncludeBase64 = includeBase64
 
                 // Helper to fire cancel event
                 func fireCancel() {
@@ -277,6 +283,7 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
 
     var pendingVideoId: String?
     var pendingVideoEvent: String?
+    var pendingIncludeBase64: Bool = false
 
     // User captured a video
     func imagePickerController(_ picker: UIImagePickerController,
@@ -336,8 +343,13 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                 // Fire success event on main thread
                 var payload: [String: Any] = [
                     "path": fileURL.path(percentEncoded: false),
+                    "fileUri": fileURL.absoluteString,
                     "mimeType": "video/\(fileExtension)"
                 ]
+                if self?.pendingIncludeBase64 == true,
+                   let data = try? Data(contentsOf: fileURL) {
+                    payload["base64"] = "data:video/\(fileExtension);base64," + data.base64EncodedString()
+                }
                 if let id = self?.pendingVideoId {
                     payload["id"] = id
                 }
@@ -363,6 +375,7 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             // Clean up
             self?.pendingVideoId = nil
             self?.pendingVideoEvent = nil
+            self?.pendingIncludeBase64 = false
         }
     }
 
@@ -384,6 +397,7 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         // Clean up
         pendingVideoId = nil
         pendingVideoEvent = nil
+        pendingIncludeBase64 = false
     }
 }
 
@@ -396,6 +410,7 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
     var pendingPhotoId: String?
     var pendingPhotoEvent: String?
     var pendingWatermarkOptions: [String: Any]?
+    var pendingIncludeBase64: Bool = false
 
     // User captured a photo
     func imagePickerController(_ picker: UIImagePickerController,
@@ -466,8 +481,13 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                 // Fire success event on main thread
                 var payload: [String: Any] = [
                     "path": fileURL.path(percentEncoded: false),
+                    "fileUri": fileURL.absoluteString,
                     "mimeType": "image/jpeg"
                 ]
+                if self?.pendingIncludeBase64 == true,
+                   let data = try? Data(contentsOf: fileURL) {
+                    payload["base64"] = "data:image/jpeg;base64," + data.base64EncodedString()
+                }
                 if let id = self?.pendingPhotoId {
                     payload["id"] = id
                 }
@@ -494,6 +514,7 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             self?.pendingPhotoId = nil
             self?.pendingPhotoEvent = nil
             self?.pendingWatermarkOptions = nil
+            self?.pendingIncludeBase64 = false
         }
     }
 
@@ -516,6 +537,7 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         pendingPhotoId = nil
         pendingPhotoEvent = nil
         pendingWatermarkOptions = nil
+        pendingIncludeBase64 = false
     }
 
     // MARK: - Watermark
@@ -587,11 +609,13 @@ final class CameraGalleryManager: NSObject {
 
     var pendingGalleryId: String?
     var pendingGalleryEvent: String?
+    var pendingIncludeBase64: Bool = false
 
-    func openGallery(mediaType: String, multiple: Bool, maxItems: Int, id: String? = nil, event: String? = nil) {
-        // Store id and event for callback
+    func openGallery(mediaType: String, multiple: Bool, maxItems: Int, id: String? = nil, event: String? = nil, includeBase64: Bool = false) {
+        // Store id, event, and options for callback
         pendingGalleryId = id
         pendingGalleryEvent = event
+        pendingIncludeBase64 = includeBase64
         guard let windowScene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }),
@@ -668,6 +692,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
         // Capture event class and id before async processing
         let eventClass = pendingGalleryEvent ?? "Native\\Mobile\\Events\\Gallery\\MediaSelected"
         let capturedId = pendingGalleryId
+        let capturedIncludeBase64 = pendingIncludeBase64
 
         for (index, result) in results.enumerated() {
             group.enter()
@@ -678,7 +703,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "image") { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "image", includeBase64: capturedIncludeBase64) { fileInfo in
                             if let fileInfo = fileInfo {
                                 processedFiles.append(fileInfo)
                             }
@@ -690,7 +715,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "video") { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "video", includeBase64: capturedIncludeBase64) { fileInfo in
                             if let fileInfo = fileInfo {
                                 processedFiles.append(fileInfo)
                             }
@@ -717,10 +742,11 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
             // Clean up
             self?.pendingGalleryId = nil
             self?.pendingGalleryEvent = nil
+            self?.pendingIncludeBase64 = false
         }
     }
 
-    private func copyFileToCache(url: URL, index: Int, type: String, completion: @escaping ([String: Any]?) -> Void) {
+    private func copyFileToCache(url: URL, index: Int, type: String, includeBase64: Bool = false, completion: @escaping ([String: Any]?) -> Void) {
         let fileManager = FileManager.default
 
         // Use persistent application support directory with Gallery subfolder
@@ -742,12 +768,17 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
 
             try fileManager.copyItem(at: url, to: destinationURL)
 
-            let fileInfo: [String: Any] = [
+            let mimeType = getMimeType(for: fileExtension)
+            var fileInfo: [String: Any] = [
                 "path": destinationURL.path,
-                "mimeType": getMimeType(for: fileExtension),
+                "fileUri": destinationURL.absoluteString,
+                "mimeType": mimeType,
                 "extension": fileExtension,
                 "type": type
             ]
+            if includeBase64, let data = try? Data(contentsOf: destinationURL) {
+                fileInfo["base64"] = "data:\(mimeType);base64," + data.base64EncodedString()
+            }
 
             completion(fileInfo)
         } catch {

@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
@@ -69,6 +70,11 @@ class CameraCoordinator : Fragment() {
     private var pendingMaxDuration: Int? = null
     @Volatile
     private var isVideoRecording = false
+
+    // Include base64 in event payloads
+    private var pendingIncludeBase64Photo: Boolean = false
+    private var pendingIncludeBase64Video: Boolean = false
+    private var pendingIncludeBase64Gallery: Boolean = false
 
     // Gallery state
     private var pendingGalleryId: String? = null
@@ -183,8 +189,12 @@ class CameraCoordinator : Fragment() {
 
                         val payload = JSONObject().apply {
                             put("path", actualPath)
+                            put("fileUri", "file://$actualPath")
                             put("mimeType", "image/jpeg")
                             pendingPhotoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Photo) {
+                                fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -204,8 +214,12 @@ class CameraCoordinator : Fragment() {
 
                         val payload = JSONObject().apply {
                             put("path", dst.absolutePath)
+                            put("fileUri", "file://${dst.absolutePath}")
                             put("mimeType", "image/jpeg")
                             pendingPhotoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Photo) {
+                                fileToBase64(dst, "image/jpeg")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -235,6 +249,7 @@ class CameraCoordinator : Fragment() {
             pendingPhotoId = null
             pendingPhotoEvent = null
             pendingWatermarkOptions = null
+            pendingIncludeBase64Photo = false
         }
 
         // Video recorder launcher
@@ -263,8 +278,12 @@ class CameraCoordinator : Fragment() {
                     if (filePath != null) {
                         val payload = JSONObject().apply {
                             put("path", filePath)
+                            put("fileUri", "file://$filePath")
                             put("mimeType", "video/mp4")
                             pendingVideoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Video) {
+                                fileToBase64(File(filePath), "video/mp4")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -305,6 +324,7 @@ class CameraCoordinator : Fragment() {
             pendingVideoId = null
             pendingVideoEvent = null
             isVideoRecording = false
+            pendingIncludeBase64Video = false
         }
 
         // Single gallery picker
@@ -322,6 +342,7 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val includeBase64 = pendingIncludeBase64Gallery
 
             if (uri != null) {
                 Log.d(TAG, "✅ Single gallery picker - URI received successfully")
@@ -371,6 +392,9 @@ class CameraCoordinator : Fragment() {
 
                         // Get file metadata
                         val fileMetadata = getFileMetadata(uri, dst.absolutePath)
+                        if (includeBase64) {
+                            fileToBase64(dst, mimeType)?.let { b64 -> fileMetadata.put("base64", b64) }
+                        }
                         val filesArray = JSONArray()
                         filesArray.put(fileMetadata)
 
@@ -421,6 +445,7 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingIncludeBase64Gallery = false
         }
 
         // Multiple gallery picker
@@ -437,6 +462,7 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val includeBase64 = pendingIncludeBase64Gallery
 
             if (uris.isNotEmpty()) {
                 Log.d(TAG, "📁 Processing ${uris.size} files - moving to background thread")
@@ -486,6 +512,9 @@ class CameraCoordinator : Fragment() {
 
                             // Get file metadata and add to array
                             val fileMetadata = getFileMetadata(uri, dst.absolutePath)
+                            if (includeBase64) {
+                                fileToBase64(dst, mimeType)?.let { b64 -> fileMetadata.put("base64", b64) }
+                            }
                             filesArray.put(fileMetadata)
                         }
 
@@ -534,6 +563,7 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingIncludeBase64Gallery = false
         }
     }
 
@@ -551,7 +581,7 @@ class CameraCoordinator : Fragment() {
         Log.d(TAG, "🧹 Fragment destroyed and resources cleaned up")
     }
 
-    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null) {
+    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null, includeBase64: Boolean = false) {
         val context = requireContext()
 
         Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}")
@@ -559,6 +589,7 @@ class CameraCoordinator : Fragment() {
         pendingPhotoId = id
         pendingPhotoEvent = event
         pendingWatermarkOptions = watermark
+        pendingIncludeBase64Photo = includeBase64
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -609,7 +640,7 @@ class CameraCoordinator : Fragment() {
         cameraLauncher.launch(photoUri)
     }
 
-    fun launchVideoRecorder(maxDuration: Int?, id: String? = null, event: String? = null) {
+    fun launchVideoRecorder(maxDuration: Int?, id: String? = null, event: String? = null, includeBase64: Boolean = false) {
         val context = requireContext()
 
         synchronized(this) {
@@ -625,6 +656,7 @@ class CameraCoordinator : Fragment() {
 
         pendingVideoId = id
         pendingVideoEvent = event
+        pendingIncludeBase64Video = includeBase64
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -686,11 +718,12 @@ class CameraCoordinator : Fragment() {
         videoRecorderLauncher.launch(intent)
     }
 
-    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null) {
+    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null, includeBase64: Boolean = false) {
         Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event")
 
         pendingGalleryId = id
         pendingGalleryEvent = event
+        pendingIncludeBase64Gallery = includeBase64
 
         val visualMediaType = when (mediaType.lowercase()) {
             "image", "images" -> ActivityResultContracts.PickVisualMedia.ImageOnly
@@ -800,6 +833,7 @@ class CameraCoordinator : Fragment() {
 
             metadata.apply {
                 put("path", cachePath)
+                put("fileUri", "file://$cachePath")
                 put("mimeType", mimeType)
                 put("extension", extension)
                 put("type", type)
@@ -870,6 +904,17 @@ class CameraCoordinator : Fragment() {
             Color.parseColor(if (hex.startsWith("#")) hex else "#$hex")
         } catch (e: Exception) {
             Color.WHITE
+        }
+    }
+
+    private fun fileToBase64(file: File, mimeType: String): String? {
+        return try {
+            val bytes = file.readBytes()
+            val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            "data:$mimeType;base64,$encoded"
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error encoding file to base64: ${e.message}", e)
+            null
         }
     }
 

@@ -32,14 +32,15 @@ object GalleryFunctions {
             val maxItems = (parameters["maxItems"] as? Number)?.toInt() ?: 10
             val id = parameters["id"] as? String
             val event = parameters["event"] as? String
+            val includeBase64 = parameters["includeBase64"] as? Boolean ?: false
 
-            Log.d("GalleryFunctions.PickMedia", "🖼️ Picking media with mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event")
+            Log.d("GalleryFunctions.PickMedia", "🖼️ Picking media with mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event, includeBase64=$includeBase64")
 
             // Launch gallery on UI thread
             Handler(Looper.getMainLooper()).post {
                 try {
                     val coord = CameraCoordinator.install(activity)
-                    coord.launchGallery(mediaType, multiple, maxItems, id, event)
+                    coord.launchGallery(mediaType, multiple, maxItems, id, event, includeBase64)
                 } catch (e: Exception) {
                     Log.e("GalleryFunctions.PickMedia", "❌ Error launching gallery: ${e.message}", e)
                 }

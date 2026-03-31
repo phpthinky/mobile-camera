@@ -10,6 +10,7 @@
             "parameters": {
                 "id": "optional string — ID to track this capture",
                 "event": "optional string — custom event class to fire",
+                "includeBase64": "optional boolean — include base64-encoded image data in the event payload (default: false)",
                 "watermark": {
                     "description": "optional object — overlay a text watermark on the captured photo",
                     "text": "string — watermark text",
@@ -24,13 +25,27 @@
             "name": "Camera.RecordVideo",
             "android": "com.nativephp.camera.CameraFunctions.RecordVideo",
             "ios": "CameraFunctions.RecordVideo",
-            "description": "Record a video with the device camera"
+            "description": "Record a video with the device camera",
+            "parameters": {
+                "maxDuration": "optional int — maximum recording duration in seconds",
+                "id": "optional string — ID to track this recording",
+                "event": "optional string — custom event class to fire",
+                "includeBase64": "optional boolean — include base64-encoded video data in the event payload (default: false)"
+            }
         },
         {
             "name": "Camera.PickMedia",
             "android": "com.nativephp.camera.GalleryFunctions.PickMedia",
             "ios": "CameraFunctions.PickMedia",
-            "description": "Pick media from the device gallery"
+            "description": "Pick media from the device gallery",
+            "parameters": {
+                "mediaType": "optional string — image, video, or all (default: all)",
+                "multiple": "optional boolean — allow multiple selection (default: false)",
+                "maxItems": "optional int — maximum items when multiple=true (default: 10)",
+                "id": "optional string — ID to track this operation",
+                "event": "optional string — custom event class to fire",
+                "includeBase64": "optional boolean — include base64-encoded data for each file in the event payload (default: false)"
+            }
         }
     ],
 
