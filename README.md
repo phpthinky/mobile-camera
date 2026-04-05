@@ -106,6 +106,39 @@ const takePhoto = async () => {
 };
 ```
 
+#### React / Inertia — Gallery
+
+The gallery event fires on **`Events.Gallery.MediaSelected`**, not `Events.Camera.*`:
+
+```js
+import { BridgeCall, On, Off, Events } from '#nativephp';
+import { useEffect } from 'react';
+
+const handleMediaSelected = (payload) => {
+    payload.files?.forEach((file) => {
+        console.log(file.fileUri); // file:// URI for <img src>
+        console.log(file.base64);  // raw base64 string (if includeBase64: true)
+    });
+};
+
+useEffect(() => {
+    On(Events.Gallery.MediaSelected, handleMediaSelected);
+    return () => {
+        Off(Events.Gallery.MediaSelected, handleMediaSelected);
+    };
+}, []);
+
+const pickImage = async () => {
+    try {
+        await BridgeCall('Camera.PickMedia', {
+            includeBase64: true,
+        });
+    } catch (e) {
+        console.error('Gallery failed', e);
+    }
+};
+```
+
 ## Events
 
 ### `PhotoTaken`
@@ -328,6 +361,10 @@ const handlePhotoTaken = (payload) => {
 
 ## Gallery with base64
 
+> **Important:** The gallery event is `Events.Gallery.MediaSelected` — **not** `Events.Camera.*`. Using the wrong namespace means the handler never fires.
+
+#### Vue
+
 ```js
 await Camera.pickImages()
     .images()
@@ -335,10 +372,17 @@ await Camera.pickImages()
 
 On(Events.Gallery.MediaSelected, (payload) => {
     payload.files.forEach((file) => {
-        console.log(file.fileUri);   // file:// URI for <img src>
-        console.log(file.base64);    // data URI for canvas
+        console.log(file.fileUri);  // file:// URI for <img src>
+        console.log(file.base64);   // raw base64 string
     });
 });
+```
+
+#### React / Inertia
+
+```js
+On(Events.Gallery.MediaSelected, handleMediaSelected); // ✅ correct namespace
+On(Events.Camera.PickMedia, handleMediaSelected);      // ❌ this event does not exist
 ```
 
 ## PendingVideoRecorder API
