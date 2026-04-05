@@ -132,6 +132,9 @@ const pickImage = async () => {
     try {
         await BridgeCall('Camera.PickMedia', {
             includeBase64: true,
+            quality: 70,   // REQUIRED when includeBase64: true — prevents OOM on large gallery images
+            width: 1024,   // max width in px
+            height: 1024,  // max height in px
         });
     } catch (e) {
         console.error('Gallery failed', e);
@@ -363,6 +366,8 @@ const handlePhotoTaken = (payload) => {
 
 > **Important:** The gallery event is `Events.Gallery.MediaSelected` — **not** `Events.Camera.*`. Using the wrong namespace means the handler never fires.
 
+> **Warning:** Always pass `quality` + `width`/`height` when using `includeBase64: true` for gallery picks. Full-resolution gallery images can be 5–10 MB; reading them into memory for base64 encoding will silently fail (returning `null`) on most devices. Resize first.
+
 #### Vue
 
 ```js
@@ -373,7 +378,7 @@ await Camera.pickImages()
 On(Events.Gallery.MediaSelected, (payload) => {
     payload.files.forEach((file) => {
         console.log(file.fileUri);  // file:// URI for <img src>
-        console.log(file.base64);   // raw base64 string
+        console.log(file.base64);   // base64 string (null if quality/width/height not set and image is large)
     });
 });
 ```

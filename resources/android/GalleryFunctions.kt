@@ -33,14 +33,17 @@ object GalleryFunctions {
             val id = parameters["id"] as? String
             val event = parameters["event"] as? String
             val includeBase64 = parameters["includeBase64"] as? Boolean ?: false
+            val quality = (parameters["quality"] as? Number)?.toInt()?.coerceIn(1, 100) ?: 90
+            val maxWidth = (parameters["width"] as? Number)?.toInt()
+            val maxHeight = (parameters["height"] as? Number)?.toInt()
 
-            Log.d("GalleryFunctions.PickMedia", "🖼️ Picking media with mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event, includeBase64=$includeBase64")
+            Log.d("GalleryFunctions.PickMedia", "🖼️ Picking media with mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event, includeBase64=$includeBase64, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
             // Launch gallery on UI thread
             Handler(Looper.getMainLooper()).post {
                 try {
                     val coord = CameraCoordinator.install(activity)
-                    coord.launchGallery(mediaType, multiple, maxItems, id, event, includeBase64)
+                    coord.launchGallery(mediaType, multiple, maxItems, id, event, includeBase64, quality, maxWidth, maxHeight)
                 } catch (e: Exception) {
                     Log.e("GalleryFunctions.PickMedia", "❌ Error launching gallery: ${e.message}", e)
                 }

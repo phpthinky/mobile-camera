@@ -47,7 +47,10 @@
                 "maxItems": "optional int — maximum items when multiple=true (default: 10)",
                 "id": "optional string — ID to track this operation",
                 "event": "optional string — custom event class to fire",
-                "includeBase64": "optional boolean — include base64-encoded data for each file in the event payload (default: false)"
+                "includeBase64": "optional boolean — include base64-encoded data for each file in the event payload (default: false)",
+                "quality": "optional number — JPEG compression quality 1–100 applied to images before base64 encoding (default: 90). Strongly recommended when includeBase64 is true to avoid out-of-memory errors on large gallery images",
+                "width": "optional number — maximum output width in pixels; image is scaled down proportionally if wider (never upscaled)",
+                "height": "optional number — maximum output height in pixels; image is scaled down proportionally if taller (never upscaled)"
             }
         }
     ],

@@ -81,6 +81,11 @@ class CameraCoordinator : Fragment() {
     private var pendingPhotoMaxWidth: Int? = null
     private var pendingPhotoMaxHeight: Int? = null
 
+    // Gallery quality / resize
+    private var pendingGalleryQuality: Int = 90
+    private var pendingGalleryMaxWidth: Int? = null
+    private var pendingGalleryMaxHeight: Int? = null
+
     // Gallery state
     private var pendingGalleryId: String? = null
     private var pendingGalleryEvent: String? = null
@@ -402,6 +407,11 @@ class CameraCoordinator : Fragment() {
 
                         Log.d(TAG, "✅ File copied successfully")
 
+                        // Resize/compress image if quality or dimensions were specified
+                        if (mimeType.startsWith("image/")) {
+                            resizeAndCompressPhoto(dst, pendingGalleryQuality, pendingGalleryMaxWidth, pendingGalleryMaxHeight)
+                        }
+
                         // Get file metadata
                         val fileMetadata = getFileMetadata(uri, dst.absolutePath)
                         if (includeBase64) {
@@ -522,6 +532,11 @@ class CameraCoordinator : Fragment() {
                                 }
                             }
 
+                            // Resize/compress image if quality or dimensions were specified
+                            if (mimeType.startsWith("image/")) {
+                                resizeAndCompressPhoto(dst, pendingGalleryQuality, pendingGalleryMaxWidth, pendingGalleryMaxHeight)
+                            }
+
                             // Get file metadata and add to array
                             val fileMetadata = getFileMetadata(uri, dst.absolutePath)
                             if (includeBase64) {
@@ -576,6 +591,9 @@ class CameraCoordinator : Fragment() {
             pendingGalleryId = null
             pendingGalleryEvent = null
             pendingIncludeBase64Gallery = false
+            pendingGalleryQuality = 90
+            pendingGalleryMaxWidth = null
+            pendingGalleryMaxHeight = null
         }
     }
 
@@ -733,12 +751,15 @@ class CameraCoordinator : Fragment() {
         videoRecorderLauncher.launch(intent)
     }
 
-    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null, includeBase64: Boolean = false) {
-        Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event")
+    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null) {
+        Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
         pendingGalleryId = id
         pendingGalleryEvent = event
         pendingIncludeBase64Gallery = includeBase64
+        pendingGalleryQuality = quality
+        pendingGalleryMaxWidth = maxWidth
+        pendingGalleryMaxHeight = maxHeight
 
         val visualMediaType = when (mediaType.lowercase()) {
             "image", "images" -> ActivityResultContracts.PickVisualMedia.ImageOnly

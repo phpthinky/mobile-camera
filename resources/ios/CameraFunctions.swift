@@ -144,8 +144,12 @@ enum CameraFunctions {
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
             let includeBase64 = parameters["includeBase64"] as? Bool ?? false
+            let rawQuality = (parameters["quality"] as? NSNumber)?.doubleValue ?? 90.0
+            let quality = CGFloat(max(1.0, min(100.0, rawQuality))) / 100.0
+            let maxWidth = (parameters["width"] as? NSNumber).map { CGFloat($0.doubleValue) }
+            let maxHeight = (parameters["height"] as? NSNumber).map { CGFloat($0.doubleValue) }
 
-            print("🖼️ Picking media with mediaType=\(mediaType), multiple=\(multiple), maxItems=\(maxItems), id=\(id ?? "nil"), event=\(event ?? "nil"), includeBase64=\(includeBase64)")
+            print("🖼️ Picking media with mediaType=\(mediaType), multiple=\(multiple), maxItems=\(maxItems), id=\(id ?? "nil"), event=\(event ?? "nil"), includeBase64=\(includeBase64), quality=\(quality), maxWidth=\(maxWidth.map { String($0) } ?? "nil"), maxHeight=\(maxHeight.map { String($0) } ?? "nil")")
 
             DispatchQueue.main.async {
                 CameraGalleryManager.shared.openGallery(
@@ -154,7 +158,10 @@ enum CameraFunctions {
                     maxItems: maxItems,
                     id: id,
                     event: event,
-                    includeBase64: includeBase64
+                    includeBase64: includeBase64,
+                    quality: quality,
+                    maxWidth: maxWidth,
+                    maxHeight: maxHeight
                 )
             }
 
@@ -652,12 +659,18 @@ final class CameraGalleryManager: NSObject {
     var pendingGalleryId: String?
     var pendingGalleryEvent: String?
     var pendingIncludeBase64: Bool = false
+    var pendingGalleryQuality: CGFloat = 0.9
+    var pendingGalleryMaxWidth: CGFloat? = nil
+    var pendingGalleryMaxHeight: CGFloat? = nil
 
-    func openGallery(mediaType: String, multiple: Bool, maxItems: Int, id: String? = nil, event: String? = nil, includeBase64: Bool = false) {
+    func openGallery(mediaType: String, multiple: Bool, maxItems: Int, id: String? = nil, event: String? = nil, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil) {
         // Store id, event, and options for callback
         pendingGalleryId = id
         pendingGalleryEvent = event
         pendingIncludeBase64 = includeBase64
+        pendingGalleryQuality = quality
+        pendingGalleryMaxWidth = maxWidth
+        pendingGalleryMaxHeight = maxHeight
         guard let windowScene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }),
@@ -735,6 +748,9 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
         let eventClass = pendingGalleryEvent ?? "Native\\Mobile\\Events\\Gallery\\MediaSelected"
         let capturedId = pendingGalleryId
         let capturedIncludeBase64 = pendingIncludeBase64
+        let capturedQuality = pendingGalleryQuality
+        let capturedMaxWidth = pendingGalleryMaxWidth
+        let capturedMaxHeight = pendingGalleryMaxHeight
 
         for (index, result) in results.enumerated() {
             group.enter()
@@ -745,7 +761,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "image", includeBase64: capturedIncludeBase64) { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "image", includeBase64: capturedIncludeBase64, quality: capturedQuality, maxWidth: capturedMaxWidth, maxHeight: capturedMaxHeight) { fileInfo in
                             if let fileInfo = fileInfo {
                                 processedFiles.append(fileInfo)
                             }
@@ -757,7 +773,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "video", includeBase64: capturedIncludeBase64) { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "video", includeBase64: capturedIncludeBase64, quality: capturedQuality, maxWidth: capturedMaxWidth, maxHeight: capturedMaxHeight) { fileInfo in
                             if let fileInfo = fileInfo {
                                 processedFiles.append(fileInfo)
                             }
@@ -785,10 +801,13 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
             self?.pendingGalleryId = nil
             self?.pendingGalleryEvent = nil
             self?.pendingIncludeBase64 = false
+            self?.pendingGalleryQuality = 0.9
+            self?.pendingGalleryMaxWidth = nil
+            self?.pendingGalleryMaxHeight = nil
         }
     }
 
-    private func copyFileToCache(url: URL, index: Int, type: String, includeBase64: Bool = false, completion: @escaping ([String: Any]?) -> Void) {
+    private func copyFileToCache(url: URL, index: Int, type: String, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil, completion: @escaping ([String: Any]?) -> Void) {
         let fileManager = FileManager.default
 
         // Use persistent application support directory with Gallery subfolder
@@ -811,6 +830,15 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
             try fileManager.copyItem(at: url, to: destinationURL)
 
             let mimeType = getMimeType(for: fileExtension)
+
+            // For images: resize/recompress if dimensions or quality specified
+            if type == "image", let image = UIImage(contentsOfFile: destinationURL.path) {
+                let resized = image.resizedIfNeeded(maxWidth: maxWidth, maxHeight: maxHeight)
+                if let jpegData = resized.jpegData(compressionQuality: quality) {
+                    try? jpegData.write(to: destinationURL)
+                }
+            }
+
             var fileInfo: [String: Any] = [
                 "path": destinationURL.path,
                 "fileUri": destinationURL.absoluteString,
