@@ -48,6 +48,8 @@ Camera::pickImages('all', true);      // Any media type
 
 ### JavaScript (Vue/React/Inertia)
 
+#### Vue
+
 ```js
 import { Camera, On, Off, Events } from '#nativephp';
 
@@ -69,6 +71,38 @@ await Camera.pickImages()
     .maxItems(5);
 ```
 
+#### React / Inertia
+
+In React, use `BridgeCall` to trigger the camera and `On`/`Off` inside `useEffect` to manage the event subscription:
+
+```js
+import { BridgeCall, On, Off, Events } from '#nativephp';
+import { useEffect } from 'react';
+
+const handlePhotoTaken = (payload) => {
+    console.log(payload.fileUri);  // file:// URI for <img src>
+    console.log(payload.base64);   // raw base64 string (if includeBase64: true)
+};
+
+useEffect(() => {
+    On(Events.Camera.PhotoTaken, handlePhotoTaken);
+    return () => {
+        Off(Events.Camera.PhotoTaken, handlePhotoTaken);
+    };
+}, []);
+
+const takePhoto = async () => {
+    try {
+        await BridgeCall('Camera.GetPhoto', {
+            id: 'profile-pic',
+            includeBase64: true,
+        });
+    } catch (e) {
+        console.error('Camera failed', e);
+    }
+};
+```
+
 ## Events
 
 ### `PhotoTaken`
@@ -80,7 +114,7 @@ Fired when a photo is taken with the camera.
 - `string $fileUri` — `file://` URI, ready for use in `<img src>` or a web view
 - `string $mimeType` — Always `image/jpeg`
 - `?string $id` — Optional identifier if set via `id()`
-- `?string $base64` — Data URI string (`data:image/jpeg;base64,...`) — only present when `includeBase64` is `true`
+- `?string $base64` — Base64-encoded image data — only present when `includeBase64` is `true`. May arrive as a full data URI (`data:image/jpeg;base64,...`) or as a raw base64 string depending on platform; always normalise before use (see [Handling the base64 payload](#handling-the-base64-payload))
 
 #### PHP
 
@@ -129,7 +163,7 @@ Fired when a video is successfully recorded.
 - `string $fileUri` — `file://` URI for use in `<video src>`
 - `string $mimeType` — Video MIME type (default: `video/mp4`)
 - `?string $id` — Optional identifier if set via `id()`
-- `?string $base64` — Data URI string — only present when `includeBase64` is `true`
+- `?string $base64` — Base64-encoded video data — only present when `includeBase64` is `true`. May arrive as a raw base64 string or a full data URI; normalise before use
 
 ### `VideoCancelled`
 
@@ -148,7 +182,7 @@ Fired when media is selected from the gallery.
   - `string mimeType`
   - `string extension`
   - `string type` — `image` or `video`
-  - `?string base64` — Data URI string — only present when `includeBase64` is `true`
+  - `?string base64` — Base64-encoded data — only present when `includeBase64` is `true`. May be a raw base64 string or a full data URI; normalise before use
 - `?string $id` — Optional identifier if set
 
 ```php
@@ -199,6 +233,51 @@ await Camera.getPhoto()
 
 ### Handling the base64 payload
 
+> **Important:** `payload.base64` may arrive as either a full data URI (`data:image/jpeg;base64,...`) or a raw base64 string (no prefix), depending on the platform. Always normalise it before use:
+
+```js
+const toDataUri = (base64) =>
+    base64.startsWith('data') ? base64 : `data:image/jpeg;base64,${base64}`;
+```
+
+#### Image preview
+
+```js
+const handlePhotoTaken = (payload) => {
+    if (!payload.base64) return;
+    document.getElementById('preview').src = toDataUri(payload.base64);
+};
+```
+
+#### Uploading to a server
+
+Send the raw `payload.base64` string as JSON — no Blob or FormData needed:
+
+```js
+const handlePhotoTaken = async (payload) => {
+    // Normalise for local preview
+    setPreview(toDataUri(payload.base64));
+
+    // Send raw base64 string to your API
+    const response = await fetch('/api/upload', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json',
+        },
+        body: JSON.stringify({
+            image_base64: payload.base64, // raw string — let the server decode it
+            name: 'photo.jpg',
+        }),
+    });
+
+    const json = await response.json();
+    console.log(json);
+};
+```
+
+#### Canvas colour extraction
+
 ```js
 const handlePhotoTaken = (payload) => {
     if (!payload.base64) return;
@@ -214,9 +293,9 @@ const handlePhotoTaken = (payload) => {
         ctx.drawImage(img, Math.floor(img.width / 2), Math.floor(img.height / 2), 1, 1, 0, 0, 1, 1);
         const [r, g, b] = ctx.getImageData(0, 0, 1, 1).data;
         const hex = '#' + [r, g, b].map(v => v.toString(16).padStart(2, '0')).join('');
-        console.log('Soil colour:', hex);
+        console.log('Colour:', hex);
     };
-    img.src = payload.base64;
+    img.src = toDataUri(payload.base64);
 };
 ```
 
