@@ -4,7 +4,13 @@ import android.Manifest
 import android.content.ContentValues
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.Paint
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
 import android.util.Log
@@ -54,6 +60,7 @@ class CameraCoordinator : Fragment() {
     private var pendingPhotoId: String? = null
     private var pendingPhotoEvent: String? = null
     private var pendingCameraOperation: String? = null
+    private var pendingWatermarkOptions: Map<String, Any>? = null
 
     // Video state
     private var pendingVideoUri: Uri? = null
@@ -161,29 +168,49 @@ class CameraCoordinator : Fragment() {
             val cancelEventClass = "Native\\Mobile\\Events\\Camera\\PhotoCancelled"
 
             if (success && pendingCameraUri != null) {
-                val dst = File(context.cacheDir, "captured_${System.currentTimeMillis()}.jpg")
-
                 try {
-                    context.contentResolver.openInputStream(pendingCameraUri!!)?.use { input ->
-                        dst.outputStream().buffered(64 * 1024).use { output ->
-                            input.copyTo(output)
+                    // Resolve the actual file path from the MediaStore URI so the event path
+                    // matches the file that was saved to the gallery (DCIM/Camera/...).
+                    val actualPath = getPhotoPathFromUri(pendingCameraUri!!)
+
+                    if (actualPath != null) {
+                        val file = File(actualPath)
+
+                        // Apply watermark in-place on the gallery file if requested
+                        pendingWatermarkOptions?.let { options ->
+                            applyWatermarkToFile(file, options)
                         }
-                    }
-                    // Clean up MediaStore entry
-                    try {
-                        context.contentResolver.delete(pendingCameraUri!!, null, null)
-                    } catch (e: Exception) {
-                        Log.w(TAG, "⚠️ Could not delete MediaStore entry: ${e.message}")
-                    }
 
-                    val payload = JSONObject().apply {
-                        put("path", dst.absolutePath)
-                        put("mimeType", "image/jpeg")
-                        pendingPhotoId?.let { put("id", it) }
-                    }
+                        val payload = JSONObject().apply {
+                            put("path", actualPath)
+                            put("mimeType", "image/jpeg")
+                            pendingPhotoId?.let { put("id", it) }
+                        }
 
-                    dispatchEvent(eventClass, payload.toString())
-                    Log.d(TAG, "✅ Photo captured successfully: ${dst.absolutePath}")
+                        dispatchEvent(eventClass, payload.toString())
+                        Log.d(TAG, "✅ Photo captured successfully: $actualPath")
+                    } else {
+                        // Fallback: copy from URI to persistent app storage
+                        Log.w(TAG, "⚠️ Could not resolve MediaStore path, falling back to copy")
+                        val dst = File(context.filesDir, "captured_${System.currentTimeMillis()}.jpg")
+                        context.contentResolver.openInputStream(pendingCameraUri!!)?.use { input ->
+                            dst.outputStream().buffered(64 * 1024).use { output ->
+                                input.copyTo(output)
+                            }
+                        }
+                        pendingWatermarkOptions?.let { options ->
+                            applyWatermarkToFile(dst, options)
+                        }
+
+                        val payload = JSONObject().apply {
+                            put("path", dst.absolutePath)
+                            put("mimeType", "image/jpeg")
+                            pendingPhotoId?.let { put("id", it) }
+                        }
+
+                        dispatchEvent(eventClass, payload.toString())
+                        Log.d(TAG, "✅ Photo captured (fallback copy): ${dst.absolutePath}")
+                    }
                 } catch (e: Exception) {
                     Log.e(TAG, "❌ Error processing camera photo: ${e.message}", e)
                     Toast.makeText(context, "Failed to save photo", Toast.LENGTH_SHORT).show()
@@ -207,6 +234,7 @@ class CameraCoordinator : Fragment() {
             pendingCameraUri = null
             pendingPhotoId = null
             pendingPhotoEvent = null
+            pendingWatermarkOptions = null
         }
 
         // Video recorder launcher
@@ -310,10 +338,25 @@ class CameraCoordinator : Fragment() {
                         val timestamp = System.currentTimeMillis()
 
                         // Use Gallery subfolder in cache directory
-                        val galleryDir = File(context.cacheDir, "Gallery")
+                        val galleryDir = File(context.filesDir, "Gallery")
                         galleryDir.mkdirs()
 
-                        val dst = File(galleryDir, "gallery_selected_$timestamp")
+                        // Resolve extension before creating the destination file so the path
+                        // returned to the app includes the correct extension (e.g. .jpg, .mp4).
+                        val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                        val ext = when {
+                            mimeType.startsWith("image/jpeg") -> "jpg"
+                            mimeType.startsWith("image/png") -> "png"
+                            mimeType.startsWith("image/gif") -> "gif"
+                            mimeType.startsWith("image/webp") -> "webp"
+                            mimeType.startsWith("video/mp4") -> "mp4"
+                            mimeType.startsWith("video/avi") -> "avi"
+                            mimeType.startsWith("video/quicktime") -> "mov"
+                            mimeType.startsWith("video/3gpp") -> "3gp"
+                            mimeType.startsWith("video/webm") -> "webm"
+                            else -> mimeType.split("/").getOrNull(1) ?: "bin"
+                        }
+                        val dst = File(galleryDir, "gallery_selected_${timestamp}.$ext")
 
                         Log.d(TAG, "🧵 Background copying file to cache")
 
@@ -408,7 +451,7 @@ class CameraCoordinator : Fragment() {
                         Log.d(TAG, "🧵 Background processing ${uris.size} files")
 
                         // Use Gallery subfolder in cache directory
-                        val galleryDir = File(context.cacheDir, "Gallery")
+                        val galleryDir = File(context.filesDir, "Gallery")
                         galleryDir.mkdirs()
 
                         uris.forEachIndexed { index, uri ->
@@ -417,7 +460,22 @@ class CameraCoordinator : Fragment() {
                                 Log.d(TAG, "📂 Processing file ${index + 1}/${uris.size}")
                             }
 
-                            val dst = File(galleryDir, "gallery_selected_${timestamp}_$index")
+                            // Resolve extension before creating the destination file so the path
+                            // returned to the app includes the correct extension (e.g. .jpg, .mp4).
+                            val mimeType = context.contentResolver.getType(uri) ?: "application/octet-stream"
+                            val ext = when {
+                                mimeType.startsWith("image/jpeg") -> "jpg"
+                                mimeType.startsWith("image/png") -> "png"
+                                mimeType.startsWith("image/gif") -> "gif"
+                                mimeType.startsWith("image/webp") -> "webp"
+                                mimeType.startsWith("video/mp4") -> "mp4"
+                                mimeType.startsWith("video/avi") -> "avi"
+                                mimeType.startsWith("video/quicktime") -> "mov"
+                                mimeType.startsWith("video/3gpp") -> "3gp"
+                                mimeType.startsWith("video/webm") -> "webm"
+                                else -> mimeType.split("/").getOrNull(1) ?: "bin"
+                            }
+                            val dst = File(galleryDir, "gallery_selected_${timestamp}_${index}.$ext")
 
                             // Use buffered streams with 64KB buffer for better performance
                             context.contentResolver.openInputStream(uri)?.use { input ->
@@ -493,13 +551,14 @@ class CameraCoordinator : Fragment() {
         Log.d(TAG, "🧹 Fragment destroyed and resources cleaned up")
     }
 
-    fun launchCamera(id: String? = null, event: String? = null) {
+    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null) {
         val context = requireContext()
 
-        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event")
+        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}")
 
         pendingPhotoId = id
         pendingPhotoEvent = event
+        pendingWatermarkOptions = watermark
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -520,12 +579,21 @@ class CameraCoordinator : Fragment() {
         val context = requireContext()
         val resolver = context.contentResolver
 
+        val photoContentValues = ContentValues().apply {
+            put(MediaStore.Images.Media.TITLE, "NativePHP_${System.currentTimeMillis()}")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            // RELATIVE_PATH places the file in DCIM/Camera (visible in Gallery).
+            // IS_PENDING must NOT be set here: the system camera app is a different process
+            // and cannot write to a pending entry owned by this app — it would return
+            // RESULT_CANCELED, causing PhotoCancelled to fire instead of PhotoTaken.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Images.Media.RELATIVE_PATH, "DCIM/Camera")
+            }
+        }
+
         val photoUri = resolver.insert(
             MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-            ContentValues().apply {
-                put(MediaStore.Images.Media.TITLE, "NativePHP_${System.currentTimeMillis()}")
-                put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
-            }
+            photoContentValues
         ) ?: run {
             Log.e(TAG, "❌ Failed to create camera URI")
             Toast.makeText(context, "Failed to prepare camera", Toast.LENGTH_SHORT).show()
@@ -580,12 +648,19 @@ class CameraCoordinator : Fragment() {
 
         Log.d(TAG, "🎥 proceedWithVideoRecording - creating MediaStore URI")
 
+        val videoContentValues = ContentValues().apply {
+            put(MediaStore.Video.Media.TITLE, "NativePHP_${System.currentTimeMillis()}")
+            put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
+            // Same reasoning as photo capture: do not set IS_PENDING — the system camera app
+            // (a different process) cannot write to a pending entry owned by this app.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                put(MediaStore.Video.Media.RELATIVE_PATH, "DCIM/Camera")
+            }
+        }
+
         val videoUri = resolver.insert(
             MediaStore.Video.Media.EXTERNAL_CONTENT_URI,
-            ContentValues().apply {
-                put(MediaStore.Video.Media.TITLE, "NativePHP_${System.currentTimeMillis()}")
-                put(MediaStore.Video.Media.MIME_TYPE, "video/mp4")
-            }
+            videoContentValues
         ) ?: run {
             Log.e(TAG, "❌ Failed to create video URI")
             Toast.makeText(context, "Failed to prepare video recorder", Toast.LENGTH_SHORT).show()
@@ -652,24 +727,33 @@ class CameraCoordinator : Fragment() {
         }
     }
 
+    private fun getPhotoPathFromUri(uri: Uri): String? {
+        val context = requireContext()
+        val projection = arrayOf(MediaStore.Images.Media.DATA)
+        return try {
+            context.contentResolver.query(uri, projection, null, null, null)?.use { cursor ->
+                if (cursor.moveToFirst()) {
+                    val columnIndex = cursor.getColumnIndex(MediaStore.Images.Media.DATA)
+                    if (columnIndex != -1) cursor.getString(columnIndex) else null
+                } else null
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "⚠️ Could not query MediaStore path: ${e.message}")
+            null
+        }
+    }
+
     private fun getVideoPathFromUri(uri: Uri): String? {
         val context = requireContext()
 
         try {
             val timestamp = System.currentTimeMillis()
-            val cacheFile = File(context.cacheDir, "video_$timestamp.mp4")
+            val cacheFile = File(context.filesDir, "video_$timestamp.mp4")
 
             context.contentResolver.openInputStream(uri)?.use { input ->
                 cacheFile.outputStream().buffered(64 * 1024).use { output ->
                     input.copyTo(output)
                 }
-            }
-
-            // Clean up MediaStore entry after copying
-            try {
-                context.contentResolver.delete(uri, null, null)
-            } catch (e: Exception) {
-                Log.w(TAG, "⚠️ Could not delete MediaStore entry: ${e.message}")
             }
 
             return cacheFile.absolutePath
@@ -733,6 +817,60 @@ class CameraCoordinator : Fragment() {
         }
 
         return metadata
+    }
+
+    private fun applyWatermarkToFile(file: File, options: Map<String, Any>) {
+        val text = options["text"] as? String ?: return
+        val position = (options["position"] as? String ?: "bottom-right").lowercase()
+        val colorHex = options["color"] as? String ?: "#FFFFFF"
+        val fontSize = (options["size"] as? Number)?.toFloat() ?: 48f
+        val opacity = (options["opacity"] as? Number)?.toFloat() ?: 0.7f
+
+        try {
+            val original = BitmapFactory.decodeFile(file.absolutePath) ?: return
+            val mutable = original.copy(Bitmap.Config.ARGB_8888, true)
+            original.recycle()
+
+            val canvas = Canvas(mutable)
+            val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+                color = parseWatermarkColor(colorHex)
+                alpha = (opacity * 255).toInt().coerceIn(0, 255)
+                textSize = fontSize
+                setShadowLayer(3f, 1f, 1f, Color.BLACK)
+            }
+
+            val textWidth = paint.measureText(text)
+            val padding = 32f
+
+            val x: Float
+            val y: Float
+            when (position) {
+                "top-left"     -> { x = padding;                             y = padding - paint.ascent() }
+                "top-right"    -> { x = mutable.width - textWidth - padding; y = padding - paint.ascent() }
+                "bottom-left"  -> { x = padding;                             y = mutable.height - padding }
+                "center"       -> { x = (mutable.width - textWidth) / 2f;   y = (mutable.height + (paint.descent() - paint.ascent())) / 2f }
+                else           -> { x = mutable.width - textWidth - padding; y = mutable.height - padding } // bottom-right
+            }
+
+            canvas.drawText(text, x, y, paint)
+
+            file.outputStream().use { out ->
+                mutable.compress(Bitmap.CompressFormat.JPEG, 90, out)
+            }
+            mutable.recycle()
+
+            Log.d(TAG, "🖼️ Watermark applied successfully")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error applying watermark: ${e.message}", e)
+        }
+    }
+
+    private fun parseWatermarkColor(hex: String): Int {
+        return try {
+            Color.parseColor(if (hex.startsWith("#")) hex else "#$hex")
+        } catch (e: Exception) {
+            Color.WHITE
+        }
     }
 
     private fun dispatchEvent(event: String, payloadJson: String) {

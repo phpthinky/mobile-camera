@@ -16,6 +16,12 @@ enum CameraFunctions {
     /// Parameters:
     ///   - id: (optional) string - Optional ID to track this specific photo capture
     ///   - event: (optional) string - Custom event class to fire (defaults to "Native\Mobile\Events\Camera\PhotoTaken")
+    ///   - watermark: (optional) object - Watermark options to overlay on the captured photo
+    ///       - text: string - Text to draw as watermark
+    ///       - position: (optional) string - "bottom-right" (default), "bottom-left", "top-right", "top-left", "center"
+    ///       - color: (optional) string - Hex color e.g. "#FFFFFF" (default)
+    ///       - size: (optional) number - Font size in points (default: 48)
+    ///       - opacity: (optional) number - 0.0 to 1.0 (default: 0.7)
     /// Returns:
     ///   - (empty map - results are returned via events)
     /// Events:
@@ -26,8 +32,9 @@ enum CameraFunctions {
         func execute(parameters: [String: Any]) throws -> [String: Any] {
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
+            let watermark = parameters["watermark"] as? [String: Any]
 
-            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil")")
+            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil)")
 
             // Helper to fire permission denied event
             func firePermissionDenied() {
@@ -43,14 +50,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentPhotoPicker(id: id, event: event)
+                presentPhotoPicker(id: id, event: event, watermark: watermark)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentPhotoPicker(id: id, event: event)
+                            self.presentPhotoPicker(id: id, event: event, watermark: watermark)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -74,11 +81,12 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentPhotoPicker(id: String?, event: String?) {
+        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?) {
             DispatchQueue.main.async {
-                // Set id and event on delegate before presenting picker
+                // Set id, event and watermark on delegate before presenting picker
                 CameraPhotoDelegate.shared.pendingPhotoId = id
                 CameraPhotoDelegate.shared.pendingPhotoEvent = event
+                CameraPhotoDelegate.shared.pendingWatermarkOptions = watermark
 
                 guard let windowScene = UIApplication.shared.connectedScenes
                     .compactMap({ $0 as? UIWindowScene })
@@ -299,14 +307,15 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let fm = FileManager.default
 
-            // Use temporary directory
-            let tempDir = fm.temporaryDirectory
+            // Use persistent application support directory
+            let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+            try? fm.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
 
             // Generate unique filename
             let timestamp = Int(Date().timeIntervalSince1970 * 1000)
             let fileExtension = videoURL.pathExtension.isEmpty ? "mp4" : videoURL.pathExtension
             let filename = "captured_video_\(timestamp).\(fileExtension)"
-            var fileURL = tempDir.appendingPathComponent(filename)
+            var fileURL = appSupportDir.appendingPathComponent(filename)
 
             do {
                 // Remove existing file if present
@@ -386,6 +395,7 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
 
     var pendingPhotoId: String?
     var pendingPhotoEvent: String?
+    var pendingWatermarkOptions: [String: Any]?
 
     // User captured a photo
     func imagePickerController(_ picker: UIImagePickerController,
@@ -412,17 +422,20 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             return
         }
 
+        let capturedWatermark = pendingWatermarkOptions
+
         // Save on a background queue
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let fm = FileManager.default
 
-            // Use temporary directory
-            let tempDir = fm.temporaryDirectory
+            // Use persistent application support directory
+            let appSupportDir = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fm.temporaryDirectory
+            try? fm.createDirectory(at: appSupportDir, withIntermediateDirectories: true)
 
             // Generate unique filename
             let timestamp = Int(Date().timeIntervalSince1970 * 1000)
             let filename = "captured_photo_\(timestamp).jpg"
-            var fileURL = tempDir.appendingPathComponent(filename)
+            var fileURL = appSupportDir.appendingPathComponent(filename)
 
             do {
                 // Remove existing file if present
@@ -430,8 +443,13 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                     try fm.removeItem(at: fileURL)
                 }
 
+                // Apply watermark if requested
+                let finalImage = capturedWatermark != nil
+                    ? CameraPhotoDelegate.applyWatermark(to: image, options: capturedWatermark!)
+                    : image
+
                 // Convert to JPEG and save
-                guard let jpegData = image.jpegData(compressionQuality: 0.9) else {
+                guard let jpegData = finalImage.jpegData(compressionQuality: 0.9) else {
                     print("❌ Failed to convert image to JPEG")
                     return
                 }
@@ -475,6 +493,7 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             // Clean up
             self?.pendingPhotoId = nil
             self?.pendingPhotoEvent = nil
+            self?.pendingWatermarkOptions = nil
         }
     }
 
@@ -496,6 +515,68 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         // Clean up
         pendingPhotoId = nil
         pendingPhotoEvent = nil
+        pendingWatermarkOptions = nil
+    }
+
+    // MARK: - Watermark
+
+    static func applyWatermark(to image: UIImage, options: [String: Any]) -> UIImage {
+        guard let text = options["text"] as? String else { return image }
+
+        let position = (options["position"] as? String ?? "bottom-right").lowercased()
+        let colorHex = options["color"] as? String ?? "#FFFFFF"
+        let fontSize = options["size"] as? CGFloat ?? 48.0
+        let opacity = options["opacity"] as? Double ?? 0.7
+
+        let renderer = UIGraphicsImageRenderer(size: image.size)
+        return renderer.image { _ in
+            image.draw(in: CGRect(origin: .zero, size: image.size))
+
+            let shadow = NSShadow()
+            shadow.shadowColor = UIColor.black.withAlphaComponent(0.5)
+            shadow.shadowOffset = CGSize(width: 1, height: 1)
+            shadow.shadowBlurRadius = 3
+
+            let attributes: [NSAttributedString.Key: Any] = [
+                .font: UIFont.boldSystemFont(ofSize: fontSize),
+                .foregroundColor: colorFromHex(colorHex).withAlphaComponent(CGFloat(opacity)),
+                .shadow: shadow
+            ]
+
+            let textSize = text.size(withAttributes: attributes)
+            let padding: CGFloat = 32
+
+            let point: CGPoint
+            switch position {
+            case "top-left":
+                point = CGPoint(x: padding, y: padding)
+            case "top-right":
+                point = CGPoint(x: image.size.width - textSize.width - padding, y: padding)
+            case "bottom-left":
+                point = CGPoint(x: padding, y: image.size.height - textSize.height - padding)
+            case "center":
+                point = CGPoint(x: (image.size.width - textSize.width) / 2,
+                                y: (image.size.height - textSize.height) / 2)
+            default: // bottom-right
+                point = CGPoint(x: image.size.width - textSize.width - padding,
+                                y: image.size.height - textSize.height - padding)
+            }
+
+            text.draw(at: point, withAttributes: attributes)
+        }
+    }
+
+    private static func colorFromHex(_ hex: String) -> UIColor {
+        let cleaned = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
+        guard cleaned.count == 6, let rgb = UInt64(cleaned, radix: 16) else {
+            return .white
+        }
+        return UIColor(
+            red:   CGFloat((rgb >> 16) & 0xFF) / 255,
+            green: CGFloat((rgb >> 8)  & 0xFF) / 255,
+            blue:  CGFloat(rgb         & 0xFF) / 255,
+            alpha: 1
+        )
     }
 }
 
@@ -642,9 +723,9 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
     private func copyFileToCache(url: URL, index: Int, type: String, completion: @escaping ([String: Any]?) -> Void) {
         let fileManager = FileManager.default
 
-        // Use temporary directory with Gallery subfolder
-        let tempDir = fileManager.temporaryDirectory
-        let galleryDir = tempDir.appendingPathComponent("Gallery", isDirectory: true)
+        // Use persistent application support directory with Gallery subfolder
+        let appSupportDir = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first ?? fileManager.temporaryDirectory
+        let galleryDir = appSupportDir.appendingPathComponent("Gallery", isDirectory: true)
 
         // Ensure Gallery directory exists
         try? fileManager.createDirectory(at: galleryDir, withIntermediateDirectories: true)
