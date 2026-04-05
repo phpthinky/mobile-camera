@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
@@ -69,6 +70,21 @@ class CameraCoordinator : Fragment() {
     private var pendingMaxDuration: Int? = null
     @Volatile
     private var isVideoRecording = false
+
+    // Include base64 in event payloads
+    private var pendingIncludeBase64Photo: Boolean = false
+    private var pendingIncludeBase64Video: Boolean = false
+    private var pendingIncludeBase64Gallery: Boolean = false
+
+    // Photo quality / resize
+    private var pendingPhotoQuality: Int = 90
+    private var pendingPhotoMaxWidth: Int? = null
+    private var pendingPhotoMaxHeight: Int? = null
+
+    // Gallery quality / resize
+    private var pendingGalleryQuality: Int = 90
+    private var pendingGalleryMaxWidth: Int? = null
+    private var pendingGalleryMaxHeight: Int? = null
 
     // Gallery state
     private var pendingGalleryId: String? = null
@@ -176,15 +192,22 @@ class CameraCoordinator : Fragment() {
                     if (actualPath != null) {
                         val file = File(actualPath)
 
+                        // Resize and/or re-compress if quality or dimensions were specified
+                        resizeAndCompressPhoto(file, pendingPhotoQuality, pendingPhotoMaxWidth, pendingPhotoMaxHeight)
+
                         // Apply watermark in-place on the gallery file if requested
                         pendingWatermarkOptions?.let { options ->
-                            applyWatermarkToFile(file, options)
+                            applyWatermarkToFile(file, options, pendingPhotoQuality)
                         }
 
                         val payload = JSONObject().apply {
                             put("path", actualPath)
+                            put("fileUri", "file://$actualPath")
                             put("mimeType", "image/jpeg")
                             pendingPhotoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Photo) {
+                                fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -198,14 +221,19 @@ class CameraCoordinator : Fragment() {
                                 input.copyTo(output)
                             }
                         }
+                        resizeAndCompressPhoto(dst, pendingPhotoQuality, pendingPhotoMaxWidth, pendingPhotoMaxHeight)
                         pendingWatermarkOptions?.let { options ->
-                            applyWatermarkToFile(dst, options)
+                            applyWatermarkToFile(dst, options, pendingPhotoQuality)
                         }
 
                         val payload = JSONObject().apply {
                             put("path", dst.absolutePath)
+                            put("fileUri", "file://${dst.absolutePath}")
                             put("mimeType", "image/jpeg")
                             pendingPhotoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Photo) {
+                                fileToBase64(dst, "image/jpeg")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -235,6 +263,10 @@ class CameraCoordinator : Fragment() {
             pendingPhotoId = null
             pendingPhotoEvent = null
             pendingWatermarkOptions = null
+            pendingIncludeBase64Photo = false
+            pendingPhotoQuality = 90
+            pendingPhotoMaxWidth = null
+            pendingPhotoMaxHeight = null
         }
 
         // Video recorder launcher
@@ -263,8 +295,12 @@ class CameraCoordinator : Fragment() {
                     if (filePath != null) {
                         val payload = JSONObject().apply {
                             put("path", filePath)
+                            put("fileUri", "file://$filePath")
                             put("mimeType", "video/mp4")
                             pendingVideoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Video) {
+                                fileToBase64(File(filePath), "video/mp4")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -305,6 +341,7 @@ class CameraCoordinator : Fragment() {
             pendingVideoId = null
             pendingVideoEvent = null
             isVideoRecording = false
+            pendingIncludeBase64Video = false
         }
 
         // Single gallery picker
@@ -322,6 +359,7 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val includeBase64 = pendingIncludeBase64Gallery
 
             if (uri != null) {
                 Log.d(TAG, "✅ Single gallery picker - URI received successfully")
@@ -369,8 +407,16 @@ class CameraCoordinator : Fragment() {
 
                         Log.d(TAG, "✅ File copied successfully")
 
+                        // Resize/compress image if quality or dimensions were specified
+                        if (mimeType.startsWith("image/")) {
+                            resizeAndCompressPhoto(dst, pendingGalleryQuality, pendingGalleryMaxWidth, pendingGalleryMaxHeight)
+                        }
+
                         // Get file metadata
                         val fileMetadata = getFileMetadata(uri, dst.absolutePath)
+                        if (includeBase64) {
+                            fileToBase64(dst, mimeType)?.let { b64 -> fileMetadata.put("base64", b64) }
+                        }
                         val filesArray = JSONArray()
                         filesArray.put(fileMetadata)
 
@@ -421,6 +467,7 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingIncludeBase64Gallery = false
         }
 
         // Multiple gallery picker
@@ -437,6 +484,7 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val includeBase64 = pendingIncludeBase64Gallery
 
             if (uris.isNotEmpty()) {
                 Log.d(TAG, "📁 Processing ${uris.size} files - moving to background thread")
@@ -484,8 +532,16 @@ class CameraCoordinator : Fragment() {
                                 }
                             }
 
+                            // Resize/compress image if quality or dimensions were specified
+                            if (mimeType.startsWith("image/")) {
+                                resizeAndCompressPhoto(dst, pendingGalleryQuality, pendingGalleryMaxWidth, pendingGalleryMaxHeight)
+                            }
+
                             // Get file metadata and add to array
                             val fileMetadata = getFileMetadata(uri, dst.absolutePath)
+                            if (includeBase64) {
+                                fileToBase64(dst, mimeType)?.let { b64 -> fileMetadata.put("base64", b64) }
+                            }
                             filesArray.put(fileMetadata)
                         }
 
@@ -534,6 +590,10 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingIncludeBase64Gallery = false
+            pendingGalleryQuality = 90
+            pendingGalleryMaxWidth = null
+            pendingGalleryMaxHeight = null
         }
     }
 
@@ -551,14 +611,18 @@ class CameraCoordinator : Fragment() {
         Log.d(TAG, "🧹 Fragment destroyed and resources cleaned up")
     }
 
-    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null) {
+    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null) {
         val context = requireContext()
 
-        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}")
+        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
         pendingPhotoId = id
         pendingPhotoEvent = event
         pendingWatermarkOptions = watermark
+        pendingIncludeBase64Photo = includeBase64
+        pendingPhotoQuality = quality
+        pendingPhotoMaxWidth = maxWidth
+        pendingPhotoMaxHeight = maxHeight
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -609,7 +673,7 @@ class CameraCoordinator : Fragment() {
         cameraLauncher.launch(photoUri)
     }
 
-    fun launchVideoRecorder(maxDuration: Int?, id: String? = null, event: String? = null) {
+    fun launchVideoRecorder(maxDuration: Int?, id: String? = null, event: String? = null, includeBase64: Boolean = false) {
         val context = requireContext()
 
         synchronized(this) {
@@ -625,6 +689,7 @@ class CameraCoordinator : Fragment() {
 
         pendingVideoId = id
         pendingVideoEvent = event
+        pendingIncludeBase64Video = includeBase64
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -686,11 +751,15 @@ class CameraCoordinator : Fragment() {
         videoRecorderLauncher.launch(intent)
     }
 
-    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null) {
-        Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event")
+    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null) {
+        Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
         pendingGalleryId = id
         pendingGalleryEvent = event
+        pendingIncludeBase64Gallery = includeBase64
+        pendingGalleryQuality = quality
+        pendingGalleryMaxWidth = maxWidth
+        pendingGalleryMaxHeight = maxHeight
 
         val visualMediaType = when (mediaType.lowercase()) {
             "image", "images" -> ActivityResultContracts.PickVisualMedia.ImageOnly
@@ -800,6 +869,7 @@ class CameraCoordinator : Fragment() {
 
             metadata.apply {
                 put("path", cachePath)
+                put("fileUri", "file://$cachePath")
                 put("mimeType", mimeType)
                 put("extension", extension)
                 put("type", type)
@@ -819,7 +889,47 @@ class CameraCoordinator : Fragment() {
         return metadata
     }
 
-    private fun applyWatermarkToFile(file: File, options: Map<String, Any>) {
+    private fun resizeAndCompressPhoto(file: File, quality: Int, maxWidth: Int?, maxHeight: Int?) {
+        // Decode bounds cheaply first to decide if resize is needed
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val origWidth = bounds.outWidth
+        val origHeight = bounds.outHeight
+
+        val needsResize = (maxWidth != null && origWidth > maxWidth) ||
+                          (maxHeight != null && origHeight > maxHeight)
+
+        // Nothing to do if no resize and quality matches default
+        if (!needsResize && quality == 90) return
+
+        val original = BitmapFactory.decodeFile(file.absolutePath) ?: return
+
+        val bitmap = if (needsResize) {
+            val scaleX = maxWidth?.let { it.toFloat() / origWidth } ?: Float.MAX_VALUE
+            val scaleY = maxHeight?.let { it.toFloat() / origHeight } ?: Float.MAX_VALUE
+            val scale = minOf(scaleX, scaleY)
+            val newWidth = (origWidth * scale).toInt()
+            val newHeight = (origHeight * scale).toInt()
+            val scaled = Bitmap.createScaledBitmap(original, newWidth, newHeight, true)
+            original.recycle()
+            scaled
+        } else {
+            original
+        }
+
+        try {
+            file.outputStream().use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            }
+            Log.d(TAG, "📐 Photo resized/compressed: ${origWidth}x${origHeight} → ${bitmap.width}x${bitmap.height} @ quality=$quality")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error resizing/compressing photo: ${e.message}", e)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun applyWatermarkToFile(file: File, options: Map<String, Any>, quality: Int = 90) {
         val text = options["text"] as? String ?: return
         val position = (options["position"] as? String ?: "bottom-right").lowercase()
         val colorHex = options["color"] as? String ?: "#FFFFFF"
@@ -855,7 +965,7 @@ class CameraCoordinator : Fragment() {
             canvas.drawText(text, x, y, paint)
 
             file.outputStream().use { out ->
-                mutable.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                mutable.compress(Bitmap.CompressFormat.JPEG, quality, out)
             }
             mutable.recycle()
 
@@ -870,6 +980,17 @@ class CameraCoordinator : Fragment() {
             Color.parseColor(if (hex.startsWith("#")) hex else "#$hex")
         } catch (e: Exception) {
             Color.WHITE
+        }
+    }
+
+    private fun fileToBase64(file: File, mimeType: String): String? {
+        return try {
+            val bytes = file.readBytes()
+            val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            "data:$mimeType;base64,$encoded"
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error encoding file to base64: ${e.message}", e)
+            null
         }
     }
 

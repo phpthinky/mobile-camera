@@ -41,14 +41,18 @@ object CameraFunctions {
             val event = parameters["event"] as? String
             @Suppress("UNCHECKED_CAST")
             val watermark = parameters["watermark"] as? Map<String, Any>
+            val includeBase64 = parameters["includeBase64"] as? Boolean ?: false
+            val quality = (parameters["quality"] as? Number)?.toInt()?.coerceIn(1, 100) ?: 90
+            val maxWidth = (parameters["width"] as? Number)?.toInt()
+            val maxHeight = (parameters["height"] as? Number)?.toInt()
 
-            Log.d("CameraFunctions.GetPhoto", "📸 Capturing photo with id=$id, event=$event, watermark=${watermark != null}")
+            Log.d("CameraFunctions.GetPhoto", "📸 Capturing photo with id=$id, event=$event, watermark=${watermark != null}, includeBase64=$includeBase64, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
             // Launch camera on UI thread
             Handler(Looper.getMainLooper()).post {
                 try {
                     val coord = CameraCoordinator.install(activity)
-                    coord.launchCamera(id, event, watermark)
+                    coord.launchCamera(id, event, watermark, includeBase64, quality, maxWidth, maxHeight)
                 } catch (e: Exception) {
                     Log.e("CameraFunctions.GetPhoto", "❌ Error launching camera: ${e.message}", e)
                 }
@@ -75,14 +79,15 @@ object CameraFunctions {
             val maxDuration = (parameters["maxDuration"] as? Number)?.toInt()
             val id = parameters["id"] as? String
             val event = parameters["event"] as? String
+            val includeBase64 = parameters["includeBase64"] as? Boolean ?: false
 
-            Log.d("CameraFunctions.RecordVideo", "🎥 Recording video with maxDuration=$maxDuration, id=$id, event=$event")
+            Log.d("CameraFunctions.RecordVideo", "🎥 Recording video with maxDuration=$maxDuration, id=$id, event=$event, includeBase64=$includeBase64")
 
             // Launch video recorder on UI thread
             Handler(Looper.getMainLooper()).post {
                 try {
                     val coord = CameraCoordinator.install(activity)
-                    coord.launchVideoRecorder(maxDuration, id, event)
+                    coord.launchVideoRecorder(maxDuration, id, event, includeBase64)
                 } catch (e: Exception) {
                     Log.e("CameraFunctions.RecordVideo", "❌ Error launching video recorder: ${e.message}", e)
                 }
