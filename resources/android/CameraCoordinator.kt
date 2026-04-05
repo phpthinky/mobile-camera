@@ -76,6 +76,11 @@ class CameraCoordinator : Fragment() {
     private var pendingIncludeBase64Video: Boolean = false
     private var pendingIncludeBase64Gallery: Boolean = false
 
+    // Photo quality / resize
+    private var pendingPhotoQuality: Int = 90
+    private var pendingPhotoMaxWidth: Int? = null
+    private var pendingPhotoMaxHeight: Int? = null
+
     // Gallery state
     private var pendingGalleryId: String? = null
     private var pendingGalleryEvent: String? = null
@@ -182,9 +187,12 @@ class CameraCoordinator : Fragment() {
                     if (actualPath != null) {
                         val file = File(actualPath)
 
+                        // Resize and/or re-compress if quality or dimensions were specified
+                        resizeAndCompressPhoto(file, pendingPhotoQuality, pendingPhotoMaxWidth, pendingPhotoMaxHeight)
+
                         // Apply watermark in-place on the gallery file if requested
                         pendingWatermarkOptions?.let { options ->
-                            applyWatermarkToFile(file, options)
+                            applyWatermarkToFile(file, options, pendingPhotoQuality)
                         }
 
                         val payload = JSONObject().apply {
@@ -208,8 +216,9 @@ class CameraCoordinator : Fragment() {
                                 input.copyTo(output)
                             }
                         }
+                        resizeAndCompressPhoto(dst, pendingPhotoQuality, pendingPhotoMaxWidth, pendingPhotoMaxHeight)
                         pendingWatermarkOptions?.let { options ->
-                            applyWatermarkToFile(dst, options)
+                            applyWatermarkToFile(dst, options, pendingPhotoQuality)
                         }
 
                         val payload = JSONObject().apply {
@@ -250,6 +259,9 @@ class CameraCoordinator : Fragment() {
             pendingPhotoEvent = null
             pendingWatermarkOptions = null
             pendingIncludeBase64Photo = false
+            pendingPhotoQuality = 90
+            pendingPhotoMaxWidth = null
+            pendingPhotoMaxHeight = null
         }
 
         // Video recorder launcher
@@ -581,15 +593,18 @@ class CameraCoordinator : Fragment() {
         Log.d(TAG, "🧹 Fragment destroyed and resources cleaned up")
     }
 
-    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null, includeBase64: Boolean = false) {
+    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null) {
         val context = requireContext()
 
-        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}")
+        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
         pendingPhotoId = id
         pendingPhotoEvent = event
         pendingWatermarkOptions = watermark
         pendingIncludeBase64Photo = includeBase64
+        pendingPhotoQuality = quality
+        pendingPhotoMaxWidth = maxWidth
+        pendingPhotoMaxHeight = maxHeight
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -853,7 +868,47 @@ class CameraCoordinator : Fragment() {
         return metadata
     }
 
-    private fun applyWatermarkToFile(file: File, options: Map<String, Any>) {
+    private fun resizeAndCompressPhoto(file: File, quality: Int, maxWidth: Int?, maxHeight: Int?) {
+        // Decode bounds cheaply first to decide if resize is needed
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val origWidth = bounds.outWidth
+        val origHeight = bounds.outHeight
+
+        val needsResize = (maxWidth != null && origWidth > maxWidth) ||
+                          (maxHeight != null && origHeight > maxHeight)
+
+        // Nothing to do if no resize and quality matches default
+        if (!needsResize && quality == 90) return
+
+        val original = BitmapFactory.decodeFile(file.absolutePath) ?: return
+
+        val bitmap = if (needsResize) {
+            val scaleX = maxWidth?.let { it.toFloat() / origWidth } ?: Float.MAX_VALUE
+            val scaleY = maxHeight?.let { it.toFloat() / origHeight } ?: Float.MAX_VALUE
+            val scale = minOf(scaleX, scaleY)
+            val newWidth = (origWidth * scale).toInt()
+            val newHeight = (origHeight * scale).toInt()
+            val scaled = Bitmap.createScaledBitmap(original, newWidth, newHeight, true)
+            original.recycle()
+            scaled
+        } else {
+            original
+        }
+
+        try {
+            file.outputStream().use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            }
+            Log.d(TAG, "📐 Photo resized/compressed: ${origWidth}x${origHeight} → ${bitmap.width}x${bitmap.height} @ quality=$quality")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error resizing/compressing photo: ${e.message}", e)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun applyWatermarkToFile(file: File, options: Map<String, Any>, quality: Int = 90) {
         val text = options["text"] as? String ?: return
         val position = (options["position"] as? String ?: "bottom-right").lowercase()
         val colorHex = options["color"] as? String ?: "#FFFFFF"
@@ -889,7 +944,7 @@ class CameraCoordinator : Fragment() {
             canvas.drawText(text, x, y, paint)
 
             file.outputStream().use { out ->
-                mutable.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                mutable.compress(Bitmap.CompressFormat.JPEG, quality, out)
             }
             mutable.recycle()
 

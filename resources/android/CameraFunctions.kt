@@ -42,14 +42,17 @@ object CameraFunctions {
             @Suppress("UNCHECKED_CAST")
             val watermark = parameters["watermark"] as? Map<String, Any>
             val includeBase64 = parameters["includeBase64"] as? Boolean ?: false
+            val quality = (parameters["quality"] as? Number)?.toInt()?.coerceIn(1, 100) ?: 90
+            val maxWidth = (parameters["width"] as? Number)?.toInt()
+            val maxHeight = (parameters["height"] as? Number)?.toInt()
 
-            Log.d("CameraFunctions.GetPhoto", "📸 Capturing photo with id=$id, event=$event, watermark=${watermark != null}, includeBase64=$includeBase64")
+            Log.d("CameraFunctions.GetPhoto", "📸 Capturing photo with id=$id, event=$event, watermark=${watermark != null}, includeBase64=$includeBase64, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
             // Launch camera on UI thread
             Handler(Looper.getMainLooper()).post {
                 try {
                     val coord = CameraCoordinator.install(activity)
-                    coord.launchCamera(id, event, watermark, includeBase64)
+                    coord.launchCamera(id, event, watermark, includeBase64, quality, maxWidth, maxHeight)
                 } catch (e: Exception) {
                     Log.e("CameraFunctions.GetPhoto", "❌ Error launching camera: ${e.message}", e)
                 }

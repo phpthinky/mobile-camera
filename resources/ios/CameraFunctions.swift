@@ -34,8 +34,12 @@ enum CameraFunctions {
             let event = parameters["event"] as? String
             let watermark = parameters["watermark"] as? [String: Any]
             let includeBase64 = parameters["includeBase64"] as? Bool ?? false
+            let rawQuality = (parameters["quality"] as? NSNumber)?.doubleValue ?? 90.0
+            let quality = CGFloat(max(1.0, min(100.0, rawQuality))) / 100.0
+            let maxWidth = (parameters["width"] as? NSNumber).map { CGFloat($0.doubleValue) }
+            let maxHeight = (parameters["height"] as? NSNumber).map { CGFloat($0.doubleValue) }
 
-            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil), includeBase64=\(includeBase64)")
+            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil), includeBase64=\(includeBase64), quality=\(quality), maxWidth=\(maxWidth.map { String($0) } ?? "nil"), maxHeight=\(maxHeight.map { String($0) } ?? "nil")")
 
             // Helper to fire permission denied event
             func firePermissionDenied() {
@@ -51,14 +55,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64)
+                presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64)
+                            self.presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -82,13 +86,16 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?, includeBase64: Bool = false) {
+        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil) {
             DispatchQueue.main.async {
                 // Set id, event and watermark on delegate before presenting picker
                 CameraPhotoDelegate.shared.pendingPhotoId = id
                 CameraPhotoDelegate.shared.pendingPhotoEvent = event
                 CameraPhotoDelegate.shared.pendingWatermarkOptions = watermark
                 CameraPhotoDelegate.shared.pendingIncludeBase64 = includeBase64
+                CameraPhotoDelegate.shared.pendingPhotoQuality = quality
+                CameraPhotoDelegate.shared.pendingPhotoMaxWidth = maxWidth
+                CameraPhotoDelegate.shared.pendingPhotoMaxHeight = maxHeight
 
                 guard let windowScene = UIApplication.shared.connectedScenes
                     .compactMap({ $0 as? UIWindowScene })
@@ -411,6 +418,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
     var pendingPhotoEvent: String?
     var pendingWatermarkOptions: [String: Any]?
     var pendingIncludeBase64: Bool = false
+    var pendingPhotoQuality: CGFloat = 0.9
+    var pendingPhotoMaxWidth: CGFloat? = nil
+    var pendingPhotoMaxHeight: CGFloat? = nil
 
     // User captured a photo
     func imagePickerController(_ picker: UIImagePickerController,
@@ -438,6 +448,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         }
 
         let capturedWatermark = pendingWatermarkOptions
+        let capturedQuality = pendingPhotoQuality
+        let capturedMaxWidth = pendingPhotoMaxWidth
+        let capturedMaxHeight = pendingPhotoMaxHeight
 
         // Save on a background queue
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -458,13 +471,21 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                     try fm.removeItem(at: fileURL)
                 }
 
+                // Resize down if width/height constraints were specified (never upscale)
+                let scaledImage: UIImage
+                if capturedMaxWidth != nil || capturedMaxHeight != nil {
+                    scaledImage = image.resizedIfNeeded(maxWidth: capturedMaxWidth, maxHeight: capturedMaxHeight)
+                } else {
+                    scaledImage = image
+                }
+
                 // Apply watermark if requested
                 let finalImage = capturedWatermark != nil
-                    ? CameraPhotoDelegate.applyWatermark(to: image, options: capturedWatermark!)
-                    : image
+                    ? CameraPhotoDelegate.applyWatermark(to: scaledImage, options: capturedWatermark!)
+                    : scaledImage
 
                 // Convert to JPEG and save
-                guard let jpegData = finalImage.jpegData(compressionQuality: 0.9) else {
+                guard let jpegData = finalImage.jpegData(compressionQuality: capturedQuality) else {
                     print("❌ Failed to convert image to JPEG")
                     return
                 }
@@ -515,6 +536,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             self?.pendingPhotoEvent = nil
             self?.pendingWatermarkOptions = nil
             self?.pendingIncludeBase64 = false
+            self?.pendingPhotoQuality = 0.9
+            self?.pendingPhotoMaxWidth = nil
+            self?.pendingPhotoMaxHeight = nil
         }
     }
 
@@ -538,6 +562,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         pendingPhotoEvent = nil
         pendingWatermarkOptions = nil
         pendingIncludeBase64 = false
+        pendingPhotoQuality = 0.9
+        pendingPhotoMaxWidth = nil
+        pendingPhotoMaxHeight = nil
     }
 
     // MARK: - Watermark
@@ -599,6 +626,21 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             blue:  CGFloat(rgb         & 0xFF) / 255,
             alpha: 1
         )
+    }
+}
+
+// MARK: - UIImage Resize Helper
+
+private extension UIImage {
+    /// Scale down to fit within maxWidth × maxHeight, preserving aspect ratio. Never upscales.
+    func resizedIfNeeded(maxWidth: CGFloat?, maxHeight: CGFloat?) -> UIImage {
+        let limitW = maxWidth ?? .greatestFiniteMagnitude
+        let limitH = maxHeight ?? .greatestFiniteMagnitude
+        guard size.width > limitW || size.height > limitH else { return self }
+        let scale = min(limitW / size.width, limitH / size.height)
+        let newSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in self.draw(in: CGRect(origin: .zero, size: newSize)) }
     }
 }
 

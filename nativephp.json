@@ -11,6 +11,9 @@
                 "id": "optional string — ID to track this capture",
                 "event": "optional string — custom event class to fire",
                 "includeBase64": "optional boolean — include base64-encoded image data in the event payload (default: false)",
+                "quality": "optional number — JPEG compression quality 1–100 (default: 90). Lower values produce smaller files",
+                "width": "optional number — maximum output width in pixels; image is scaled down proportionally if wider (never upscaled)",
+                "height": "optional number — maximum output height in pixels; image is scaled down proportionally if taller (never upscaled)",
                 "watermark": {
                     "description": "optional object — overlay a text watermark on the captured photo",
                     "text": "string — watermark text",

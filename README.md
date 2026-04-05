@@ -96,6 +96,9 @@ const takePhoto = async () => {
         await BridgeCall('Camera.GetPhoto', {
             id: 'profile-pic',
             includeBase64: true,
+            quality: 70,   // JPEG quality 1–100 (default 90)
+            width: 1024,   // max width in px — scales down proportionally
+            height: 1024,  // max height in px — scales down proportionally
         });
     } catch (e) {
         console.error('Camera failed', e);
@@ -212,6 +215,28 @@ const handlePhotoTaken = (payload) => {
     document.getElementById('preview').src = payload.fileUri;
 };
 ```
+
+## Image Compression & Resizing
+
+Full-resolution camera photos can be several megabytes. Use `quality`, `width`, and `height` to reduce file size before the `PhotoTaken` event fires — the resize and re-compress happens on-device before the payload is sent.
+
+| Parameter | Type | Default | Description |
+|-----------|------|---------|-------------|
+| `quality` | `number` (1–100) | `90` | JPEG compression quality. `70` is a good balance for uploads. |
+| `width` | `number` | — | Maximum output width in pixels. Scales down proportionally; never upscales. |
+| `height` | `number` | — | Maximum output height in pixels. Scales down proportionally; never upscales. |
+
+```js
+await BridgeCall('Camera.GetPhoto', {
+    id: 'wood_profile',
+    includeBase64: true,
+    quality: 70,   // reduces file size significantly for most photos
+    width: 1024,   // cap at 1024 px wide
+    height: 1024,  // cap at 1024 px tall
+});
+```
+
+> Both `width` and `height` are optional and independent — set only one to constrain a single dimension.
 
 ## Base64 / Colour Extraction
 
