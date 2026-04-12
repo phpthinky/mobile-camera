@@ -1029,18 +1029,18 @@ class CameraCoordinator : Fragment() {
 
     private fun proceedWithOverlayCapture() {
         val context = requireContext()
-        CameraForegroundService.start(context)
+        // Do NOT start CameraForegroundService here.
+        // The foreground service exists only for the system-camera-intent path,
+        // where our app goes to the background while the OS camera UI is open.
+        // CameraOverlayActivity IS our foreground UI — it opens the camera
+        // directly via CameraX. Running the camera foreground service at the
+        // same time causes a double camera-claim on Android 14 and crashes.
         Log.d(TAG, "📸 Launching CameraOverlayActivity (shape=$pendingRegionShape, size=$pendingRegionSize%)")
         try {
             val intent = CameraOverlayActivity.createIntent(context, pendingRegionShape, pendingRegionSize)
             overlayActivityLauncher.launch(intent)
         } catch (e: Throwable) {
-            // CameraOverlayActivity is unavailable — either not registered in the
-            // manifest yet or CameraX deps are missing. Fall back to the system
-            // camera so the app never force-exits. extractedColor is still added
-            // to the payload by the cameraLauncher result handler below.
             Log.w(TAG, "⚠️ CameraOverlayActivity unavailable (${e.message}), falling back to system camera")
-            CameraForegroundService.stop(context)
             proceedWithCameraCapture()
         }
     }
@@ -1050,8 +1050,7 @@ class CameraCoordinator : Fragment() {
             Log.e(TAG, "Fragment not attached, ignoring overlay result")
             return
         }
-
-        CameraForegroundService.stop(requireContext())
+        // No CameraForegroundService to stop — we never started it for this path.
 
         val eventClass = pendingPhotoEvent ?: "Native\\Mobile\\Events\\Camera\\PhotoTaken"
         val cancelEventClass = "Native\\Mobile\\Events\\Camera\\PhotoCancelled"
