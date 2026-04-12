@@ -1,31 +1,17 @@
 package com.nativephp.camera
 
-import android.Manifest
 import android.app.Activity
 import android.content.Context
 import android.content.Intent
-import android.content.pm.PackageManager
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.DashPathEffect
-import android.graphics.ImageFormat
 import android.graphics.Paint
 import android.graphics.RectF
-import android.graphics.SurfaceTexture
-import android.hardware.camera2.CameraCharacteristics
-import android.hardware.camera2.CameraDevice
-import android.hardware.camera2.CameraManager
-import android.hardware.camera2.CaptureRequest
-import android.hardware.camera2.CameraCaptureSession
-import android.media.ImageReader
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.HandlerThread
 import android.util.Log
 import android.view.Gravity
-import android.view.Surface
-import android.view.TextureView
 import android.view.View
 import android.view.ViewGroup
 import android.view.WindowInsets
@@ -33,18 +19,28 @@ import android.view.WindowInsetsController
 import android.widget.FrameLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
+import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.core.content.ContextCompat
 import java.io.File
-import java.io.FileOutputStream
-import java.nio.ByteBuffer
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 
 /**
- * Full-screen camera activity built on the Camera2 API (no external deps).
- * Shows a live preview with a configurable circle or box overlay in the
- * centre to guide colour extraction.
+ * Full-screen camera activity using CameraX with a layered FrameLayout.
  *
- * Launched by [CameraCoordinator] when `regionIndicator = true`.
- * Returns the captured JPEG path via [RESULT_PHOTO_PATH].
+ * Layout stack (bottom → top):
+ *   1. PreviewView  — camera frames, managed entirely by CameraX
+ *   2. RegionOverlayView — plain UI View drawn by the main thread;
+ *      completely independent of the camera pipeline (no Surface conflicts)
+ *   3. Shutter button + Cancel button
+ *
+ * The overlay is kept INVISIBLE until ProcessCameraProvider confirms the
+ * camera is bound, avoiding any draw/calculate work before the preview is live.
  */
 class CameraOverlayActivity : ComponentActivity() {
 
@@ -62,76 +58,46 @@ class CameraOverlayActivity : ComponentActivity() {
             }
     }
 
-    // ── Camera2 state ─────────────────────────────────────────────────────────
-    private lateinit var textureView: TextureView
-    private var cameraDevice: CameraDevice? = null
-    private var captureSession: CameraCaptureSession? = null
-    private var imageReader: ImageReader? = null
-    private var cameraId: String = ""
-    private var sensorOrientation: Int = 90
+    private var imageCapture: ImageCapture? = null
+    private lateinit var cameraExecutor: ExecutorService
+    private lateinit var overlayView: RegionOverlayView
 
-    private val bgThread = HandlerThread("CameraOverlayBg").also { it.start() }
-    private val bgHandler = Handler(bgThread.looper)
-
-    // ── Region params ─────────────────────────────────────────────────────────
-    private var shape: String = "circle"
-    private var sizePercent: Int = 25
-
-    // ── TextureView listener — opens camera once surface is ready ─────────────
-    private val surfaceListener = object : TextureView.SurfaceTextureListener {
-        override fun onSurfaceTextureAvailable(st: SurfaceTexture, w: Int, h: Int) {
-            openCamera()
-        }
-        override fun onSurfaceTextureSizeChanged(st: SurfaceTexture, w: Int, h: Int) {}
-        override fun onSurfaceTextureDestroyed(st: SurfaceTexture): Boolean = true
-        override fun onSurfaceTextureUpdated(st: SurfaceTexture) {}
-    }
-
-    // ── Camera state callback ─────────────────────────────────────────────────
-    private val cameraStateCallback = object : CameraDevice.StateCallback() {
-        override fun onOpened(camera: CameraDevice) {
-            cameraDevice = camera
-            createPreviewSession()
-        }
-        override fun onDisconnected(camera: CameraDevice) {
-            camera.close(); cameraDevice = null
-        }
-        override fun onError(camera: CameraDevice, error: Int) {
-            Log.e(TAG, "❌ Camera error $error")
-            camera.close(); cameraDevice = null
-            setResult(Activity.RESULT_CANCELED); finish()
-        }
-    }
-
-    // ── onCreate ──────────────────────────────────────────────────────────────
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         goFullscreen()
 
-        shape       = intent.getStringExtra(EXTRA_REGION_SHAPE) ?: "circle"
-        sizePercent = intent.getIntExtra(EXTRA_REGION_SIZE, 25)
+        val shape = intent.getStringExtra(EXTRA_REGION_SHAPE) ?: "circle"
+        val size  = intent.getIntExtra(EXTRA_REGION_SIZE, 25)
 
+        cameraExecutor = Executors.newSingleThreadExecutor()
+
+        // ── Root container ────────────────────────────────────────────────────
         val root = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
 
-        // Camera preview
-        textureView = TextureView(this).apply {
+        // ── Layer 1 (bottom): camera preview ──────────────────────────────────
+        // PreviewView handles its own Surface lifecycle; we never touch it.
+        val previewView = PreviewView(this).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-            surfaceTextureListener = this@CameraOverlayActivity.surfaceListener
+            implementationMode = PreviewView.ImplementationMode.COMPATIBLE
         }
-        root.addView(textureView)
+        root.addView(previewView)
 
-        // Region indicator overlay
-        root.addView(RegionOverlayView(this, shape, sizePercent).apply {
+        // ── Layer 2 (middle): region indicator ───────────────────────────────
+        // A standard View drawn by the UI thread — no camera surface interaction.
+        // Kept invisible until the camera is live so nothing is calculated early.
+        overlayView = RegionOverlayView(this, shape, size).apply {
             layoutParams = FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 ViewGroup.LayoutParams.MATCH_PARENT
             )
-        })
+            visibility = View.INVISIBLE
+        }
+        root.addView(overlayView)
 
-        // Shutter button
+        // ── Layer 3 (top): shutter button ─────────────────────────────────────
         val btnPx = dpToPx(72)
         root.addView(CaptureButtonView(this).apply {
             layoutParams = FrameLayout.LayoutParams(btnPx, btnPx).apply {
@@ -141,7 +107,7 @@ class CameraOverlayActivity : ComponentActivity() {
             setOnClickListener { takePhoto() }
         })
 
-        // Cancel button (✕ top-left)
+        // ── Layer 4 (top): cancel button ──────────────────────────────────────
         root.addView(TextView(this).apply {
             text     = "✕"
             textSize = 22f
@@ -159,138 +125,86 @@ class CameraOverlayActivity : ComponentActivity() {
         })
 
         setContentView(root)
+
+        // Bind camera — overlay becomes visible only after successful bind
+        startCamera(previewView)
     }
 
-    // ── Camera2 — open ────────────────────────────────────────────────────────
-    private fun openCamera() {
-        if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA)
-                != PackageManager.PERMISSION_GRANTED) {
-            Log.e(TAG, "❌ Camera permission not granted")
-            setResult(Activity.RESULT_CANCELED); finish(); return
-        }
+    // ── CameraX ───────────────────────────────────────────────────────────────
 
-        val manager = getSystemService(CAMERA_SERVICE) as CameraManager
-        try {
-            // Pick the back-facing camera (fall back to first available)
-            cameraId = manager.cameraIdList.firstOrNull { id ->
-                manager.getCameraCharacteristics(id)
-                    .get(CameraCharacteristics.LENS_FACING) ==
-                        CameraCharacteristics.LENS_FACING_BACK
-            } ?: manager.cameraIdList.firstOrNull() ?: run {
-                Log.e(TAG, "❌ No camera found"); setResult(Activity.RESULT_CANCELED); finish(); return
+    private fun startCamera(previewView: PreviewView) {
+        val future = ProcessCameraProvider.getInstance(this)
+        future.addListener({
+            try {
+                val provider = future.get()
+
+                val preview = Preview.Builder().build().also {
+                    it.setSurfaceProvider(previewView.surfaceProvider)
+                }
+
+                imageCapture = ImageCapture.Builder()
+                    .setCaptureMode(ImageCapture.CAPTURE_MODE_MINIMIZE_LATENCY)
+                    .build()
+
+                provider.unbindAll()
+                provider.bindToLifecycle(
+                    this,   // ComponentActivity implements LifecycleOwner
+                    CameraSelector.DEFAULT_BACK_CAMERA,
+                    preview,
+                    imageCapture
+                )
+
+                // Camera is live and preview is rendering — safe to show overlay now
+                runOnUiThread {
+                    overlayView.visibility = View.VISIBLE
+                    Log.d(TAG, "✅ Camera bound, overlay visible")
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "❌ Camera binding failed: ${e.message}", e)
+                setResult(Activity.RESULT_CANCELED)
+                finish()
             }
-
-            val characteristics = manager.getCameraCharacteristics(cameraId)
-            sensorOrientation   = characteristics.get(CameraCharacteristics.SENSOR_ORIENTATION) ?: 90
-
-            // Choose the largest JPEG output size the camera supports
-            val map    = characteristics.get(CameraCharacteristics.SCALER_STREAM_CONFIGURATION_MAP)
-            val jpgSizes = map?.getOutputSizes(ImageFormat.JPEG)
-            val largest = jpgSizes?.maxByOrNull { it.width.toLong() * it.height }
-            val jpgW = largest?.width  ?: 1920
-            val jpgH = largest?.height ?: 1080
-
-            imageReader = ImageReader.newInstance(jpgW, jpgH, ImageFormat.JPEG, 1).also {
-                it.setOnImageAvailableListener(::onImageAvailable, bgHandler)
-            }
-
-            manager.openCamera(cameraId, cameraStateCallback, bgHandler)
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ openCamera failed: ${e.message}", e)
-            setResult(Activity.RESULT_CANCELED); finish()
-        }
+        }, ContextCompat.getMainExecutor(this))
     }
 
-    // ── Camera2 — preview session ─────────────────────────────────────────────
-    private fun createPreviewSession() {
-        try {
-            val texture = textureView.surfaceTexture ?: return
-            val preview = Surface(texture)
-            val capture = imageReader?.surface ?: return
-
-            val previewReq = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_PREVIEW).apply {
-                addTarget(preview)
-                set(CaptureRequest.CONTROL_AF_MODE, CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-            }
-
-            @Suppress("DEPRECATION")
-            cameraDevice!!.createCaptureSession(
-                listOf(preview, capture),
-                object : CameraCaptureSession.StateCallback() {
-                    override fun onConfigured(session: CameraCaptureSession) {
-                        if (cameraDevice == null) return
-                        captureSession = session
-                        try {
-                            session.setRepeatingRequest(previewReq.build(), null, bgHandler)
-                            Log.d(TAG, "✅ Camera preview started")
-                        } catch (e: Exception) {
-                            Log.e(TAG, "❌ Preview start failed: ${e.message}", e)
-                        }
-                    }
-                    override fun onConfigureFailed(session: CameraCaptureSession) {
-                        Log.e(TAG, "❌ Session configuration failed")
-                        setResult(Activity.RESULT_CANCELED); finish()
-                    }
-                },
-                bgHandler
-            )
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ createPreviewSession failed: ${e.message}", e)
-        }
-    }
-
-    // ── Camera2 — capture ─────────────────────────────────────────────────────
     private fun takePhoto() {
-        try {
-            val readerSurface = imageReader?.surface ?: return
-            val req = cameraDevice!!.createCaptureRequest(CameraDevice.TEMPLATE_STILL_CAPTURE).apply {
-                addTarget(readerSurface)
-                set(CaptureRequest.CONTROL_AF_MODE,    CaptureRequest.CONTROL_AF_MODE_CONTINUOUS_PICTURE)
-                set(CaptureRequest.JPEG_ORIENTATION,   sensorOrientation)
-                set(CaptureRequest.CONTROL_AE_MODE,    CaptureRequest.CONTROL_AE_MODE_ON)
-            }
-            captureSession?.capture(req.build(), null, bgHandler)
-        } catch (e: Exception) {
-            Log.e(TAG, "❌ takePhoto failed: ${e.message}", e)
-            setResult(Activity.RESULT_CANCELED); finish()
-        }
-    }
+        val capture = imageCapture ?: return
+        val outFile = File(filesDir, "overlay_capture_${System.currentTimeMillis()}.jpg")
+        val options = ImageCapture.OutputFileOptions.Builder(outFile).build()
 
-    private fun onImageAvailable(reader: ImageReader) {
-        val image = reader.acquireLatestImage() ?: return
-        try {
-            val buffer: ByteBuffer = image.planes[0].buffer
-            val bytes = ByteArray(buffer.remaining()).also { buffer.get(it) }
-            image.close()
-
-            val outFile = File(filesDir, "overlay_capture_${System.currentTimeMillis()}.jpg")
-            FileOutputStream(outFile).use { it.write(bytes) }
-            Log.d(TAG, "✅ Photo saved: ${outFile.absolutePath}")
-
-            setResult(Activity.RESULT_OK, Intent().putExtra(RESULT_PHOTO_PATH, outFile.absolutePath))
-            finish()
-        } catch (e: Exception) {
-            image.close()
-            Log.e(TAG, "❌ Failed to save photo: ${e.message}", e)
-            setResult(Activity.RESULT_CANCELED); finish()
-        }
+        capture.takePicture(options, cameraExecutor,
+            object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) {
+                    Log.d(TAG, "✅ Photo saved: ${outFile.absolutePath}")
+                    setResult(
+                        Activity.RESULT_OK,
+                        Intent().putExtra(RESULT_PHOTO_PATH, outFile.absolutePath)
+                    )
+                    finish()
+                }
+                override fun onError(e: ImageCaptureException) {
+                    Log.e(TAG, "❌ Capture failed: ${e.message}", e)
+                    setResult(Activity.RESULT_CANCELED)
+                    finish()
+                }
+            })
     }
 
     // ── Lifecycle ─────────────────────────────────────────────────────────────
+
     override fun onDestroy() {
         super.onDestroy()
-        captureSession?.close()
-        cameraDevice?.close()
-        imageReader?.close()
-        bgThread.quitSafely()
+        cameraExecutor.shutdown()
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
     private fun goFullscreen() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             window.insetsController?.let {
                 it.hide(WindowInsets.Type.statusBars() or WindowInsets.Type.navigationBars())
-                it.systemBarsBehavior = WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                it.systemBarsBehavior =
+                    WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             }
         } else {
             @Suppress("DEPRECATION")
@@ -307,7 +221,10 @@ class CameraOverlayActivity : ComponentActivity() {
 }
 
 // =============================================================================
-// Region indicator overlay — drawn on top of the TextureView preview
+// Region indicator overlay
+// Drawn entirely by the UI thread — independent of the camera pipeline.
+// Uses four dim strips around the region so the centre is naturally transparent
+// (no blend modes, no compositing tricks needed).
 // =============================================================================
 
 internal class RegionOverlayView(
@@ -317,12 +234,12 @@ internal class RegionOverlayView(
 ) : View(context) {
 
     private val dimPaint = Paint().apply {
-        color = Color.argb(100, 0, 0, 0)
+        color = Color.argb(110, 0, 0, 0)
         style = Paint.Style.FILL
     }
     private val borderPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.WHITE
-        style = Paint.Style.STROKE
+        color       = Color.WHITE
+        style       = Paint.Style.STROKE
         strokeWidth = 3f
         pathEffect  = DashPathEffect(floatArrayOf(20f, 8f), 0f)
         alpha       = 230
@@ -340,14 +257,22 @@ internal class RegionOverlayView(
     override fun onDraw(canvas: Canvas) {
         val side = minOf(width, height) * sizePercent / 100f
         val cx   = width  / 2f
-        val cy   = height * 0.43f  // slightly above centre — shutter button is below
+        // Slightly above vertical centre so the shutter button doesn't overlap
+        val cy   = height * 0.43f
         val rect = RectF(cx - side / 2, cy - side / 2, cx + side / 2, cy + side / 2)
 
-        canvas.drawRect(0f, 0f, width.toFloat(), height.toFloat(), dimPaint)
+        // Four dim strips surrounding the region — centre stays transparent,
+        // camera preview shows through naturally with no blend-mode tricks.
+        canvas.drawRect(0f,          0f,          width.toFloat(), rect.top,          dimPaint)
+        canvas.drawRect(0f,          rect.bottom, width.toFloat(), height.toFloat(),  dimPaint)
+        canvas.drawRect(0f,          rect.top,    rect.left,       rect.bottom,       dimPaint)
+        canvas.drawRect(rect.right,  rect.top,    width.toFloat(), rect.bottom,       dimPaint)
 
+        // Dashed circle or box border
         if (shape.lowercase() == "circle") canvas.drawOval(rect, borderPaint)
         else canvas.drawRect(rect, borderPaint)
 
+        // Label below the region
         canvas.drawText("Color Sample Area", cx, rect.bottom + 48f, labelPaint)
     }
 }
