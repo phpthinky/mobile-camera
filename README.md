@@ -4,7 +4,9 @@ Camera plugin for NativePHP Mobile providing photo capture, video recording, and
 
 ## Overview
 
-The Camera API provides access to the device's camera for taking photos, recording videos, and selecting media from the gallery. Every event payload includes a `fileUri` (a `file://` URI suitable for use in `<img>` tags and web views) and supports an optional `includeBase64` flag that adds a data URI string to the payload — useful for canvas-based colour analysis, such as extracting a hex colour from a captured soil sample.
+The Camera API provides access to the device's camera for taking photos, recording videos, and selecting media from the gallery. Every event payload includes a `fileUri` (a `file://` URI suitable for use in `<img>` tags and web views) and supports an optional `includeBase64` flag that adds a data URI string to the payload.
+
+A **region indicator** (circle or box) can be shown centred in the live camera viewfinder to guide the user towards the area being sampled. When enabled, the plugin also returns an `extractedColor` hex value directly in the event payload — no canvas work or base64 required — making it ideal for colour-sampling workflows such as soil analysis.
 
 ## Installation
 
@@ -154,6 +156,7 @@ Fired when a photo is taken with the camera.
 - `string $mimeType` — Always `image/jpeg`
 - `?string $id` — Optional identifier if set via `id()`
 - `?string $base64` — Base64-encoded image data — only present when `includeBase64` is `true`. May arrive as a full data URI (`data:image/jpeg;base64,...`) or as a raw base64 string depending on platform; always normalise before use (see [Handling the base64 payload](#handling-the-base64-payload))
+- `?string $extractedColor` — Average colour of the centre region as a lowercase hex string (e.g. `#8b5e3c`) — only present when `regionIndicator` is `true`. Does not require `includeBase64`.
 
 #### PHP
 
@@ -361,6 +364,59 @@ const handlePhotoTaken = (payload) => {
 ```
 
 > **Note:** `includeBase64` is opt-in and defaults to `false`. Omit it (or set it to `false`) for normal photo/video capture — the base64 string for a full-resolution image can be several megabytes and will noticeably increase event payload size.
+
+## Region Indicator & Colour Extraction
+
+Enable a circle or box overlay centred in the camera viewfinder to show the user exactly which area will be colour-sampled. When the shutter is pressed the plugin calculates the average colour of that region and returns it as `extractedColor` in the event payload — no `includeBase64`, no canvas, no extra work.
+
+| Parameter | Type | Default | Description |
+|---|---|---|---|
+| `regionIndicator` | `boolean` | `false` | Show the region overlay in the camera viewfinder |
+| `regionShape` | `string` | `"circle"` | Shape of the indicator: `"circle"` or `"box"` |
+| `regionSize` | `number` (1–100) | `25` | Size as a percentage of the shorter screen dimension |
+
+**Platform behaviour:**
+- **iOS** — the indicator is a live overlay on `UIImagePickerController`. The periphery is dimmed and a transparent "window" is punched through, keeping the live preview fully visible inside the shape. The standard shutter button remains accessible.
+- **Android** — a custom CameraX activity is launched showing the same dashed circle/box overlay over a live preview, with a programmatic shutter button and a ✕ cancel button.
+
+### JavaScript
+
+```js
+await BridgeCall('Camera.GetPhoto', {
+    regionIndicator: true,
+    regionShape: 'circle',   // or 'box'
+    regionSize: 25,          // 25 % of the shorter screen dimension
+});
+```
+
+### Event payload
+
+```js
+On(Events.Camera.PhotoTaken, (payload) => {
+    console.log(payload.extractedColor); // e.g. "#8b5e3c"
+});
+```
+
+`extractedColor` is the average colour of the sampled region — independent of `includeBase64`. You can use both together, or just `regionIndicator: true` on its own.
+
+### Soil / surface analyser example
+
+```js
+// Trigger — no base64 needed for colour-only workflows
+await BridgeCall('Camera.GetPhoto', {
+    regionIndicator: true,
+    regionShape: 'circle',
+    regionSize: 20,   // tighter circle = more precise point sample
+});
+
+// Handle result
+On(Events.Camera.PhotoTaken, (payload) => {
+    const hex = payload.extractedColor; // "#8b5e3c"
+    analyseColour(hex);
+});
+```
+
+> **Tip:** Adjust `regionSize` to suit your use case. A smaller value (10–15) gives a precise point sample; a larger value (30–40) averages more of the surface and is more forgiving of slight camera movement.
 
 ## Gallery with base64
 
