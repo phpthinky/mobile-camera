@@ -45,14 +45,17 @@ object CameraFunctions {
             val quality = (parameters["quality"] as? Number)?.toInt()?.coerceIn(1, 100) ?: 90
             val maxWidth = (parameters["width"] as? Number)?.toInt()
             val maxHeight = (parameters["height"] as? Number)?.toInt()
+            val regionIndicator = parameters["regionIndicator"] as? Boolean ?: false
+            val regionShape = parameters["regionShape"] as? String ?: "circle"
+            val regionSize = (parameters["regionSize"] as? Number)?.toInt()?.coerceIn(1, 100) ?: 25
 
-            Log.d("CameraFunctions.GetPhoto", "📸 Capturing photo with id=$id, event=$event, watermark=${watermark != null}, includeBase64=$includeBase64, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
+            Log.d("CameraFunctions.GetPhoto", "📸 Capturing photo with id=$id, event=$event, watermark=${watermark != null}, includeBase64=$includeBase64, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight, regionIndicator=$regionIndicator, regionShape=$regionShape, regionSize=$regionSize")
 
             // Launch camera on UI thread
             Handler(Looper.getMainLooper()).post {
                 try {
                     val coord = CameraCoordinator.install(activity)
-                    coord.launchCamera(id, event, watermark, includeBase64, quality, maxWidth, maxHeight)
+                    coord.launchCamera(id, event, watermark, includeBase64, quality, maxWidth, maxHeight, regionIndicator, regionShape, regionSize)
                 } catch (e: Exception) {
                     Log.e("CameraFunctions.GetPhoto", "❌ Error launching camera: ${e.message}", e)
                 }

@@ -38,8 +38,11 @@ enum CameraFunctions {
             let quality = CGFloat(max(1.0, min(100.0, rawQuality))) / 100.0
             let maxWidth = (parameters["width"] as? NSNumber).map { CGFloat($0.doubleValue) }
             let maxHeight = (parameters["height"] as? NSNumber).map { CGFloat($0.doubleValue) }
+            let regionIndicator = parameters["regionIndicator"] as? Bool ?? false
+            let regionShape = parameters["regionShape"] as? String ?? "circle"
+            let regionSize = CGFloat(min(100.0, max(1.0, (parameters["regionSize"] as? NSNumber)?.doubleValue ?? 25.0)))
 
-            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil), includeBase64=\(includeBase64), quality=\(quality), maxWidth=\(maxWidth.map { String($0) } ?? "nil"), maxHeight=\(maxHeight.map { String($0) } ?? "nil")")
+            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil), includeBase64=\(includeBase64), quality=\(quality), maxWidth=\(maxWidth.map { String($0) } ?? "nil"), maxHeight=\(maxHeight.map { String($0) } ?? "nil"), regionIndicator=\(regionIndicator), regionShape=\(regionShape), regionSize=\(regionSize)")
 
             // Helper to fire permission denied event
             func firePermissionDenied() {
@@ -55,14 +58,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight)
+                presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight, regionIndicator: regionIndicator, regionShape: regionShape, regionSize: regionSize)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight)
+                            self.presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight, regionIndicator: regionIndicator, regionShape: regionShape, regionSize: regionSize)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -86,7 +89,7 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil) {
+        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil, regionIndicator: Bool = false, regionShape: String = "circle", regionSize: CGFloat = 25.0) {
             DispatchQueue.main.async {
                 // Set id, event and watermark on delegate before presenting picker
                 CameraPhotoDelegate.shared.pendingPhotoId = id
@@ -96,6 +99,9 @@ enum CameraFunctions {
                 CameraPhotoDelegate.shared.pendingPhotoQuality = quality
                 CameraPhotoDelegate.shared.pendingPhotoMaxWidth = maxWidth
                 CameraPhotoDelegate.shared.pendingPhotoMaxHeight = maxHeight
+                CameraPhotoDelegate.shared.pendingRegionIndicator = regionIndicator
+                CameraPhotoDelegate.shared.pendingRegionShape = regionShape
+                CameraPhotoDelegate.shared.pendingRegionSize = regionSize
 
                 guard let windowScene = UIApplication.shared.connectedScenes
                     .compactMap({ $0 as? UIWindowScene })
@@ -116,6 +122,16 @@ enum CameraFunctions {
                 picker.sourceType = .camera
                 picker.mediaTypes = [UTType.image.identifier]
                 picker.cameraCaptureMode = .photo
+
+                // Attach the region indicator overlay when requested.
+                // showsCameraControls stays true so the standard shutter button
+                // and controls remain accessible below the overlay.
+                if regionIndicator {
+                    let overlay = RegionIndicatorView(frame: UIScreen.main.bounds)
+                    overlay.shape = regionShape
+                    overlay.sizePercent = regionSize
+                    picker.cameraOverlayView = overlay
+                }
 
                 picker.delegate = CameraPhotoDelegate.shared
                 rootVC.present(picker, animated: true)
@@ -428,6 +444,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
     var pendingPhotoQuality: CGFloat = 0.9
     var pendingPhotoMaxWidth: CGFloat? = nil
     var pendingPhotoMaxHeight: CGFloat? = nil
+    var pendingRegionIndicator: Bool = false
+    var pendingRegionShape: String = "circle"
+    var pendingRegionSize: CGFloat = 25.0
 
     // User captured a photo
     func imagePickerController(_ picker: UIImagePickerController,
@@ -458,6 +477,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         let capturedQuality = pendingPhotoQuality
         let capturedMaxWidth = pendingPhotoMaxWidth
         let capturedMaxHeight = pendingPhotoMaxHeight
+        let capturedRegionIndicator = pendingRegionIndicator
+        let capturedRegionShape = pendingRegionShape
+        let capturedRegionSize = pendingRegionSize
 
         // Save on a background queue
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -516,6 +538,13 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                    let data = try? Data(contentsOf: fileURL) {
                     payload["base64"] = "data:image/jpeg;base64," + data.base64EncodedString()
                 }
+                if capturedRegionIndicator,
+                   let color = CameraPhotoDelegate.extractColorFromRegion(
+                       image: finalImage,
+                       sizePercent: capturedRegionSize
+                   ) {
+                    payload["extractedColor"] = color
+                }
                 if let id = self?.pendingPhotoId {
                     payload["id"] = id
                 }
@@ -546,6 +575,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             self?.pendingPhotoQuality = 0.9
             self?.pendingPhotoMaxWidth = nil
             self?.pendingPhotoMaxHeight = nil
+            self?.pendingRegionIndicator = false
+            self?.pendingRegionShape = "circle"
+            self?.pendingRegionSize = 25.0
         }
     }
 
@@ -572,6 +604,9 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         pendingPhotoQuality = 0.9
         pendingPhotoMaxWidth = nil
         pendingPhotoMaxHeight = nil
+        pendingRegionIndicator = false
+        pendingRegionShape = "circle"
+        pendingRegionSize = 25.0
     }
 
     // MARK: - Watermark
@@ -622,6 +657,39 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         }
     }
 
+    // MARK: - Region colour extraction
+
+    /// Crops the centre region of [image] (a square of [sizePercent]% of the
+    /// shorter dimension) and returns the average colour as a lowercase hex
+    /// string, e.g. "#a3c5e1".
+    static func extractColorFromRegion(image: UIImage, sizePercent: CGFloat) -> String? {
+        let shorter = min(image.size.width, image.size.height)
+        let side    = shorter * sizePercent / 100.0
+        let cx      = image.size.width  / 2
+        let cy      = image.size.height / 2
+        // cgImage coordinate space uses the image's own scale, so multiply by scale.
+        let scale   = image.scale
+        let cropRect = CGRect(
+            x: (cx - side / 2) * scale,
+            y: (cy - side / 2) * scale,
+            width:  side * scale,
+            height: side * scale
+        )
+        guard let cropped = image.cgImage?.cropping(to: cropRect) else { return nil }
+
+        // Render at 1×1 to get average colour
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1))
+        let avg = renderer.image { _ in
+            UIImage(cgImage: cropped).draw(in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+
+        guard let data = avg.cgImage?.dataProvider?.data,
+              let ptr  = CFDataGetBytePtr(data) else { return nil }
+
+        let r = Int(ptr[0]), g = Int(ptr[1]), b = Int(ptr[2])
+        return String(format: "#%02x%02x%02x", r, g, b)
+    }
+
     private static func colorFromHex(_ hex: String) -> UIColor {
         let cleaned = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
         guard cleaned.count == 6, let rgb = UInt64(cleaned, radix: 16) else {
@@ -648,6 +716,75 @@ private extension UIImage {
         let newSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
         let renderer = UIGraphicsImageRenderer(size: newSize)
         return renderer.image { _ in self.draw(in: CGRect(origin: .zero, size: newSize)) }
+    }
+}
+
+// MARK: - Region Indicator Overlay View
+
+/// Transparent overlay placed on top of the `UIImagePickerController` camera
+/// preview via `cameraOverlayView`.  Dims the periphery and draws a dashed
+/// circle or box in the centre so the user can see exactly which area will be
+/// sampled for colour extraction.
+private final class RegionIndicatorView: UIView {
+
+    var shape: String = "circle"
+    var sizePercent: CGFloat = 25.0
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+
+        let shorter  = min(rect.width, rect.height)
+        let side     = shorter * sizePercent / 100.0
+        let cx       = rect.midX
+        // Place slightly above vertical centre — the standard camera controls
+        // bar occupies roughly the bottom 20 % of the screen.
+        let cy       = rect.height * 0.40
+        let halfSide = side / 2
+        let region   = CGRect(x: cx - halfSide, y: cy - halfSide,
+                              width: side,       height: side)
+
+        // ── 1. Dim the entire view ─────────────────────────────────────────
+        UIColor.black.withAlphaComponent(0.38).setFill()
+        UIRectFill(rect)
+
+        // ── 2. Punch a transparent hole for the indicator region ──────────
+        ctx.setBlendMode(.clear)
+        if shape.lowercased() == "circle" {
+            ctx.fillEllipse(in: region)
+        } else {
+            ctx.fill(region)
+        }
+        ctx.setBlendMode(.normal)
+
+        // ── 3. Dashed border around the region ────────────────────────────
+        UIColor.white.withAlphaComponent(0.90).setStroke()
+        let path: UIBezierPath = shape.lowercased() == "circle"
+            ? UIBezierPath(ovalIn: region)
+            : UIBezierPath(roundedRect: region, cornerRadius: 4)
+        path.lineWidth = 2.5
+        path.setLineDash([10, 5], count: 2, phase: 0)
+        path.stroke()
+
+        // ── 4. Label below the region ─────────────────────────────────────
+        let label = "Color Sample Area" as NSString
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font:            UIFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: UIColor.white.withAlphaComponent(0.85)
+        ]
+        let labelSize = label.size(withAttributes: attrs)
+        label.draw(
+            at: CGPoint(x: cx - labelSize.width / 2, y: cy + halfSide + 10),
+            withAttributes: attrs
+        )
     }
 }
 

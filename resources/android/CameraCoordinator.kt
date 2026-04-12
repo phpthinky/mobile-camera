@@ -90,6 +90,11 @@ class CameraCoordinator : Fragment() {
     private var pendingGalleryId: String? = null
     private var pendingGalleryEvent: String? = null
 
+    // Region indicator state (used when launching CameraOverlayActivity)
+    private var pendingRegionIndicator: Boolean = false
+    private var pendingRegionShape: String = "circle"
+    private var pendingRegionSize: Int = 25
+
     // Background processing
     private var fileProcessingExecutor: ExecutorService? = null
 
@@ -99,6 +104,7 @@ class CameraCoordinator : Fragment() {
     private lateinit var cameraPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var galleryPickerSingle: ActivityResultLauncher<PickVisualMediaRequest>
     private lateinit var galleryPickerMultiple: ActivityResultLauncher<PickVisualMediaRequest>
+    private lateinit var overlayActivityLauncher: ActivityResultLauncher<Intent>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -126,7 +132,7 @@ class CameraCoordinator : Fragment() {
 
             if (granted) {
                 when (pendingCameraOperation) {
-                    "photo" -> proceedWithCameraCapture()
+                    "photo" -> if (pendingRegionIndicator) proceedWithOverlayCapture() else proceedWithCameraCapture()
                     "video" -> proceedWithVideoRecording(pendingMaxDuration)
                     else -> {
                         Log.e(TAG, "❌ Unknown camera operation: $pendingCameraOperation")
@@ -267,6 +273,9 @@ class CameraCoordinator : Fragment() {
             pendingPhotoQuality = 90
             pendingPhotoMaxWidth = null
             pendingPhotoMaxHeight = null
+            pendingRegionIndicator = false
+            pendingRegionShape = "circle"
+            pendingRegionSize = 25
         }
 
         // Video recorder launcher
@@ -595,6 +604,13 @@ class CameraCoordinator : Fragment() {
             pendingGalleryMaxWidth = null
             pendingGalleryMaxHeight = null
         }
+
+        // Overlay camera activity launcher (used when regionIndicator = true)
+        overlayActivityLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            handleOverlayActivityResult(result)
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {
@@ -611,10 +627,10 @@ class CameraCoordinator : Fragment() {
         Log.d(TAG, "🧹 Fragment destroyed and resources cleaned up")
     }
 
-    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null) {
+    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null, regionIndicator: Boolean = false, regionShape: String = "circle", regionSize: Int = 25) {
         val context = requireContext()
 
-        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
+        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight, regionIndicator=$regionIndicator, regionShape=$regionShape, regionSize=$regionSize")
 
         pendingPhotoId = id
         pendingPhotoEvent = event
@@ -623,6 +639,9 @@ class CameraCoordinator : Fragment() {
         pendingPhotoQuality = quality
         pendingPhotoMaxWidth = maxWidth
         pendingPhotoMaxHeight = maxHeight
+        pendingRegionIndicator = regionIndicator
+        pendingRegionShape = regionShape
+        pendingRegionSize = regionSize
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -636,7 +655,7 @@ class CameraCoordinator : Fragment() {
             return
         }
 
-        proceedWithCameraCapture()
+        if (pendingRegionIndicator) proceedWithOverlayCapture() else proceedWithCameraCapture()
     }
 
     private fun proceedWithCameraCapture() {
@@ -996,5 +1015,138 @@ class CameraCoordinator : Fragment() {
 
     private fun dispatchEvent(event: String, payloadJson: String) {
         NativeActionCoordinator.dispatchEvent(requireActivity(), event, payloadJson)
+    }
+
+    // -------------------------------------------------------------------------
+    // Region indicator — custom camera overlay (CameraOverlayActivity)
+    // -------------------------------------------------------------------------
+
+    private fun proceedWithOverlayCapture() {
+        val context = requireContext()
+        CameraForegroundService.start(context)
+        Log.d(TAG, "📸 Launching CameraOverlayActivity (shape=$pendingRegionShape, size=$pendingRegionSize%)")
+        val intent = CameraOverlayActivity.createIntent(context, pendingRegionShape, pendingRegionSize)
+        overlayActivityLauncher.launch(intent)
+    }
+
+    private fun handleOverlayActivityResult(result: androidx.activity.result.ActivityResult) {
+        if (!isAdded || context == null) {
+            Log.e(TAG, "Fragment not attached, ignoring overlay result")
+            return
+        }
+
+        CameraForegroundService.stop(requireContext())
+
+        val eventClass = pendingPhotoEvent ?: "Native\\Mobile\\Events\\Camera\\PhotoTaken"
+        val cancelEventClass = "Native\\Mobile\\Events\\Camera\\PhotoCancelled"
+
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val photoPath = result.data?.getStringExtra(CameraOverlayActivity.RESULT_PHOTO_PATH)
+            if (photoPath != null) {
+                // Capture state before clearing it
+                val capturedId = pendingPhotoId
+                val capturedQuality = pendingPhotoQuality
+                val capturedMaxWidth = pendingPhotoMaxWidth
+                val capturedMaxHeight = pendingPhotoMaxHeight
+                val capturedWatermark = pendingWatermarkOptions
+                val capturedIncludeBase64 = pendingIncludeBase64Photo
+                val capturedRegionSize = pendingRegionSize
+
+                cleanupOverlayPhotoState()
+
+                fileProcessingExecutor?.execute {
+                    try {
+                        val file = File(photoPath)
+
+                        resizeAndCompressPhoto(file, capturedQuality, capturedMaxWidth, capturedMaxHeight)
+                        capturedWatermark?.let { applyWatermarkToFile(file, it, capturedQuality) }
+
+                        val payload = JSONObject().apply {
+                            put("path", file.absolutePath)
+                            put("fileUri", "file://${file.absolutePath}")
+                            put("mimeType", "image/jpeg")
+                            capturedId?.let { put("id", it) }
+                            if (capturedIncludeBase64) {
+                                fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
+                            }
+                            extractColorFromRegion(file, capturedRegionSize)?.let {
+                                put("extractedColor", it)
+                            }
+                        }
+
+                        activity?.runOnUiThread {
+                            dispatchEvent(eventClass, payload.toString())
+                            Log.d(TAG, "✅ Overlay photo captured: ${file.absolutePath}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error processing overlay photo: ${e.message}", e)
+                        val payload = JSONObject().apply {
+                            put("cancelled", true)
+                            pendingPhotoId?.let { put("id", it) }
+                        }
+                        activity?.runOnUiThread { dispatchEvent(cancelEventClass, payload.toString()) }
+                    }
+                }
+            } else {
+                val payload = JSONObject().apply {
+                    put("cancelled", true)
+                    pendingPhotoId?.let { put("id", it) }
+                }
+                dispatchEvent(cancelEventClass, payload.toString())
+                cleanupOverlayPhotoState()
+            }
+        } else {
+            Log.d(TAG, "⚠️ CameraOverlayActivity was cancelled")
+            val payload = JSONObject().apply {
+                put("cancelled", true)
+                pendingPhotoId?.let { put("id", it) }
+            }
+            dispatchEvent(cancelEventClass, payload.toString())
+            cleanupOverlayPhotoState()
+        }
+    }
+
+    private fun cleanupOverlayPhotoState() {
+        pendingPhotoId = null
+        pendingPhotoEvent = null
+        pendingWatermarkOptions = null
+        pendingIncludeBase64Photo = false
+        pendingPhotoQuality = 90
+        pendingPhotoMaxWidth = null
+        pendingPhotoMaxHeight = null
+        pendingRegionIndicator = false
+        pendingRegionShape = "circle"
+        pendingRegionSize = 25
+    }
+
+    /**
+     * Scales down the center region of [file] to 1×1 pixel and returns the
+     * average colour as a lowercase hex string (e.g. "#a3c5e1").
+     */
+    private fun extractColorFromRegion(file: File, regionSizePercent: Int): String? {
+        return try {
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+            val side = (minOf(bitmap.width, bitmap.height) * regionSizePercent / 100.0)
+                .toInt().coerceAtLeast(1)
+            val left = ((bitmap.width  - side) / 2).coerceAtLeast(0)
+            val top  = ((bitmap.height - side) / 2).coerceAtLeast(0)
+            val w    = minOf(side, bitmap.width  - left)
+            val h    = minOf(side, bitmap.height - top)
+
+            val region = Bitmap.createBitmap(bitmap, left, top, w, h)
+            bitmap.recycle()
+
+            // Scale to 1×1 → average colour
+            val scaled = Bitmap.createScaledBitmap(region, 1, 1, true)
+            region.recycle()
+
+            val pixel = scaled.getPixel(0, 0)
+            scaled.recycle()
+
+            String.format("#%02x%02x%02x", Color.red(pixel), Color.green(pixel), Color.blue(pixel))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error extracting region colour: ${e.message}", e)
+            null
+        }
     }
 }
