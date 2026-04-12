@@ -740,8 +740,6 @@ private final class RegionIndicatorView: UIView {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ rect: CGRect) {
-        guard let ctx = UIGraphicsGetCurrentContext() else { return }
-
         let shorter  = min(rect.width, rect.height)
         let side     = shorter * sizePercent / 100.0
         let cx       = rect.midX
@@ -752,20 +750,22 @@ private final class RegionIndicatorView: UIView {
         let region   = CGRect(x: cx - halfSide, y: cy - halfSide,
                               width: side,       height: side)
 
-        // ── 1. Dim the entire view ─────────────────────────────────────────
-        UIColor.black.withAlphaComponent(0.38).setFill()
-        UIRectFill(rect)
+        // ── 1. Dim the four strips surrounding the region ─────────────────
+        // Filling only the strips (not the centre) avoids CGBlendMode.clear,
+        // which can behave unpredictably inside a cameraOverlayView context.
+        // The centre is left transparent so the live camera shows through.
+        let dimColor = UIColor.black.withAlphaComponent(0.40)
+        dimColor.setFill()
+        // Top strip
+        UIRectFill(CGRect(x: 0, y: 0, width: rect.width, height: region.minY))
+        // Bottom strip
+        UIRectFill(CGRect(x: 0, y: region.maxY, width: rect.width, height: rect.height - region.maxY))
+        // Left strip (beside the region only)
+        UIRectFill(CGRect(x: 0, y: region.minY, width: region.minX, height: side))
+        // Right strip
+        UIRectFill(CGRect(x: region.maxX, y: region.minY, width: rect.width - region.maxX, height: side))
 
-        // ── 2. Punch a transparent hole for the indicator region ──────────
-        ctx.setBlendMode(.clear)
-        if shape.lowercased() == "circle" {
-            ctx.fillEllipse(in: region)
-        } else {
-            ctx.fill(region)
-        }
-        ctx.setBlendMode(.normal)
-
-        // ── 3. Dashed border around the region ────────────────────────────
+        // ── 2. Dashed border around the region ────────────────────────────
         UIColor.white.withAlphaComponent(0.90).setStroke()
         let path: UIBezierPath = shape.lowercased() == "circle"
             ? UIBezierPath(ovalIn: region)
@@ -774,7 +774,7 @@ private final class RegionIndicatorView: UIView {
         path.setLineDash([10, 5], count: 2, phase: 0)
         path.stroke()
 
-        // ── 4. Label below the region ─────────────────────────────────────
+        // ── 3. Label below the region ─────────────────────────────────────
         let label = "Color Sample Area" as NSString
         let attrs: [NSAttributedString.Key: Any] = [
             .font:            UIFont.systemFont(ofSize: 13, weight: .medium),

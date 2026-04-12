@@ -214,6 +214,9 @@ class CameraCoordinator : Fragment() {
                             if (pendingIncludeBase64Photo) {
                                 fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
                             }
+                            if (pendingRegionIndicator) {
+                                extractColorFromRegion(file, pendingRegionSize)?.let { put("extractedColor", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -239,6 +242,9 @@ class CameraCoordinator : Fragment() {
                             pendingPhotoId?.let { put("id", it) }
                             if (pendingIncludeBase64Photo) {
                                 fileToBase64(dst, "image/jpeg")?.let { put("base64", it) }
+                            }
+                            if (pendingRegionIndicator) {
+                                extractColorFromRegion(dst, pendingRegionSize)?.let { put("extractedColor", it) }
                             }
                         }
 
@@ -1025,8 +1031,18 @@ class CameraCoordinator : Fragment() {
         val context = requireContext()
         CameraForegroundService.start(context)
         Log.d(TAG, "📸 Launching CameraOverlayActivity (shape=$pendingRegionShape, size=$pendingRegionSize%)")
-        val intent = CameraOverlayActivity.createIntent(context, pendingRegionShape, pendingRegionSize)
-        overlayActivityLauncher.launch(intent)
+        try {
+            val intent = CameraOverlayActivity.createIntent(context, pendingRegionShape, pendingRegionSize)
+            overlayActivityLauncher.launch(intent)
+        } catch (e: Throwable) {
+            // CameraOverlayActivity is unavailable — either not registered in the
+            // manifest yet or CameraX deps are missing. Fall back to the system
+            // camera so the app never force-exits. extractedColor is still added
+            // to the payload by the cameraLauncher result handler below.
+            Log.w(TAG, "⚠️ CameraOverlayActivity unavailable (${e.message}), falling back to system camera")
+            CameraForegroundService.stop(context)
+            proceedWithCameraCapture()
+        }
     }
 
     private fun handleOverlayActivityResult(result: androidx.activity.result.ActivityResult) {
