@@ -33,8 +33,16 @@ enum CameraFunctions {
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
             let watermark = parameters["watermark"] as? [String: Any]
+            let includeBase64 = parameters["includeBase64"] as? Bool ?? false
+            let rawQuality = (parameters["quality"] as? NSNumber)?.doubleValue ?? 90.0
+            let quality = CGFloat(max(1.0, min(100.0, rawQuality))) / 100.0
+            let maxWidth = (parameters["width"] as? NSNumber).map { CGFloat($0.doubleValue) }
+            let maxHeight = (parameters["height"] as? NSNumber).map { CGFloat($0.doubleValue) }
+            let regionIndicator = parameters["regionIndicator"] as? Bool ?? false
+            let regionShape = parameters["regionShape"] as? String ?? "circle"
+            let regionSize = CGFloat(min(100.0, max(1.0, (parameters["regionSize"] as? NSNumber)?.doubleValue ?? 25.0)))
 
-            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil)")
+            print("📸 Capturing photo with id=\(id ?? "nil"), event=\(event ?? "nil"), watermark=\(watermark != nil), includeBase64=\(includeBase64), quality=\(quality), maxWidth=\(maxWidth.map { String($0) } ?? "nil"), maxHeight=\(maxHeight.map { String($0) } ?? "nil"), regionIndicator=\(regionIndicator), regionShape=\(regionShape), regionSize=\(regionSize)")
 
             // Helper to fire permission denied event
             func firePermissionDenied() {
@@ -50,14 +58,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentPhotoPicker(id: id, event: event, watermark: watermark)
+                presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight, regionIndicator: regionIndicator, regionShape: regionShape, regionSize: regionSize)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentPhotoPicker(id: id, event: event, watermark: watermark)
+                            self.presentPhotoPicker(id: id, event: event, watermark: watermark, includeBase64: includeBase64, quality: quality, maxWidth: maxWidth, maxHeight: maxHeight, regionIndicator: regionIndicator, regionShape: regionShape, regionSize: regionSize)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -81,12 +89,19 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?) {
+        private func presentPhotoPicker(id: String?, event: String?, watermark: [String: Any]?, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil, regionIndicator: Bool = false, regionShape: String = "circle", regionSize: CGFloat = 25.0) {
             DispatchQueue.main.async {
                 // Set id, event and watermark on delegate before presenting picker
                 CameraPhotoDelegate.shared.pendingPhotoId = id
                 CameraPhotoDelegate.shared.pendingPhotoEvent = event
                 CameraPhotoDelegate.shared.pendingWatermarkOptions = watermark
+                CameraPhotoDelegate.shared.pendingIncludeBase64 = includeBase64
+                CameraPhotoDelegate.shared.pendingPhotoQuality = quality
+                CameraPhotoDelegate.shared.pendingPhotoMaxWidth = maxWidth
+                CameraPhotoDelegate.shared.pendingPhotoMaxHeight = maxHeight
+                CameraPhotoDelegate.shared.pendingRegionIndicator = regionIndicator
+                CameraPhotoDelegate.shared.pendingRegionShape = regionShape
+                CameraPhotoDelegate.shared.pendingRegionSize = regionSize
 
                 guard let windowScene = UIApplication.shared.connectedScenes
                     .compactMap({ $0 as? UIWindowScene })
@@ -107,6 +122,16 @@ enum CameraFunctions {
                 picker.sourceType = .camera
                 picker.mediaTypes = [UTType.image.identifier]
                 picker.cameraCaptureMode = .photo
+
+                // Attach the region indicator overlay when requested.
+                // showsCameraControls stays true so the standard shutter button
+                // and controls remain accessible below the overlay.
+                if regionIndicator {
+                    let overlay = RegionIndicatorView(frame: UIScreen.main.bounds)
+                    overlay.shape = regionShape
+                    overlay.sizePercent = regionSize
+                    picker.cameraOverlayView = overlay
+                }
 
                 picker.delegate = CameraPhotoDelegate.shared
                 rootVC.present(picker, animated: true)
@@ -134,8 +159,13 @@ enum CameraFunctions {
             let maxItems = parameters["maxItems"] as? Int ?? 10
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
+            let includeBase64 = parameters["includeBase64"] as? Bool ?? false
+            let rawQuality = (parameters["quality"] as? NSNumber)?.doubleValue ?? 90.0
+            let quality = CGFloat(max(1.0, min(100.0, rawQuality))) / 100.0
+            let maxWidth = (parameters["width"] as? NSNumber).map { CGFloat($0.doubleValue) }
+            let maxHeight = (parameters["height"] as? NSNumber).map { CGFloat($0.doubleValue) }
 
-            print("🖼️ Picking media with mediaType=\(mediaType), multiple=\(multiple), maxItems=\(maxItems), id=\(id ?? "nil"), event=\(event ?? "nil")")
+            print("🖼️ Picking media with mediaType=\(mediaType), multiple=\(multiple), maxItems=\(maxItems), id=\(id ?? "nil"), event=\(event ?? "nil"), includeBase64=\(includeBase64), quality=\(quality), maxWidth=\(maxWidth.map { String($0) } ?? "nil"), maxHeight=\(maxHeight.map { String($0) } ?? "nil")")
 
             DispatchQueue.main.async {
                 CameraGalleryManager.shared.openGallery(
@@ -143,7 +173,11 @@ enum CameraFunctions {
                     multiple: multiple,
                     maxItems: maxItems,
                     id: id,
-                    event: event
+                    event: event,
+                    includeBase64: includeBase64,
+                    quality: quality,
+                    maxWidth: maxWidth,
+                    maxHeight: maxHeight
                 )
             }
 
@@ -169,8 +203,9 @@ enum CameraFunctions {
             let maxDuration = parameters["maxDuration"] as? Int
             let id = parameters["id"] as? String
             let event = parameters["event"] as? String
+            let includeBase64 = parameters["includeBase64"] as? Bool ?? false
 
-            print("🎥 Recording video with maxDuration=\(maxDuration ?? 0), id=\(id ?? "nil"), event=\(event ?? "nil")")
+            print("🎥 Recording video with maxDuration=\(maxDuration ?? 0), id=\(id ?? "nil"), event=\(event ?? "nil"), includeBase64=\(includeBase64)")
 
             // Helper to fire permission denied event
             func firePermissionDenied() {
@@ -186,14 +221,14 @@ enum CameraFunctions {
             switch AVCaptureDevice.authorizationStatus(for: .video) {
             case .authorized:
                 // Permission granted, proceed to show camera
-                presentVideoPicker(maxDuration: maxDuration, id: id, event: event)
+                presentVideoPicker(maxDuration: maxDuration, id: id, event: event, includeBase64: includeBase64)
 
             case .notDetermined:
                 // Request permission
                 AVCaptureDevice.requestAccess(for: .video) { granted in
                     DispatchQueue.main.async {
                         if granted {
-                            self.presentVideoPicker(maxDuration: maxDuration, id: id, event: event)
+                            self.presentVideoPicker(maxDuration: maxDuration, id: id, event: event, includeBase64: includeBase64)
                         } else {
                             print("❌ Camera permission denied by user")
                             firePermissionDenied()
@@ -217,11 +252,12 @@ enum CameraFunctions {
             return [:]
         }
 
-        private func presentVideoPicker(maxDuration: Int?, id: String?, event: String?) {
+        private func presentVideoPicker(maxDuration: Int?, id: String?, event: String?, includeBase64: Bool = false) {
             DispatchQueue.main.async {
                 // Set id and event on delegate before presenting picker
                 CameraVideoDelegate.shared.pendingVideoId = id
                 CameraVideoDelegate.shared.pendingVideoEvent = event
+                CameraVideoDelegate.shared.pendingIncludeBase64 = includeBase64
 
                 // Helper to fire cancel event
                 func fireCancel() {
@@ -277,6 +313,7 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
 
     var pendingVideoId: String?
     var pendingVideoEvent: String?
+    var pendingIncludeBase64: Bool = false
 
     // User captured a video
     func imagePickerController(_ picker: UIImagePickerController,
@@ -336,8 +373,13 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                 // Fire success event on main thread
                 var payload: [String: Any] = [
                     "path": fileURL.path(percentEncoded: false),
+                    "fileUri": fileURL.absoluteString,
                     "mimeType": "video/\(fileExtension)"
                 ]
+                if self?.pendingIncludeBase64 == true,
+                   let data = try? Data(contentsOf: fileURL) {
+                    payload["base64"] = "data:video/\(fileExtension);base64," + data.base64EncodedString()
+                }
                 if let id = self?.pendingVideoId {
                     payload["id"] = id
                 }
@@ -363,6 +405,7 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             // Clean up
             self?.pendingVideoId = nil
             self?.pendingVideoEvent = nil
+            self?.pendingIncludeBase64 = false
         }
     }
 
@@ -384,6 +427,7 @@ final class CameraVideoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         // Clean up
         pendingVideoId = nil
         pendingVideoEvent = nil
+        pendingIncludeBase64 = false
     }
 }
 
@@ -396,6 +440,13 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
     var pendingPhotoId: String?
     var pendingPhotoEvent: String?
     var pendingWatermarkOptions: [String: Any]?
+    var pendingIncludeBase64: Bool = false
+    var pendingPhotoQuality: CGFloat = 0.9
+    var pendingPhotoMaxWidth: CGFloat? = nil
+    var pendingPhotoMaxHeight: CGFloat? = nil
+    var pendingRegionIndicator: Bool = false
+    var pendingRegionShape: String = "circle"
+    var pendingRegionSize: CGFloat = 25.0
 
     // User captured a photo
     func imagePickerController(_ picker: UIImagePickerController,
@@ -423,6 +474,12 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         }
 
         let capturedWatermark = pendingWatermarkOptions
+        let capturedQuality = pendingPhotoQuality
+        let capturedMaxWidth = pendingPhotoMaxWidth
+        let capturedMaxHeight = pendingPhotoMaxHeight
+        let capturedRegionIndicator = pendingRegionIndicator
+        let capturedRegionShape = pendingRegionShape
+        let capturedRegionSize = pendingRegionSize
 
         // Save on a background queue
         DispatchQueue.global(qos: .utility).async { [weak self] in
@@ -443,13 +500,21 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                     try fm.removeItem(at: fileURL)
                 }
 
+                // Resize down if width/height constraints were specified (never upscale)
+                let scaledImage: UIImage
+                if capturedMaxWidth != nil || capturedMaxHeight != nil {
+                    scaledImage = image.resizedIfNeeded(maxWidth: capturedMaxWidth, maxHeight: capturedMaxHeight)
+                } else {
+                    scaledImage = image
+                }
+
                 // Apply watermark if requested
                 let finalImage = capturedWatermark != nil
-                    ? CameraPhotoDelegate.applyWatermark(to: image, options: capturedWatermark!)
-                    : image
+                    ? CameraPhotoDelegate.applyWatermark(to: scaledImage, options: capturedWatermark!)
+                    : scaledImage
 
                 // Convert to JPEG and save
-                guard let jpegData = finalImage.jpegData(compressionQuality: 0.9) else {
+                guard let jpegData = finalImage.jpegData(compressionQuality: capturedQuality) else {
                     print("❌ Failed to convert image to JPEG")
                     return
                 }
@@ -466,8 +531,20 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
                 // Fire success event on main thread
                 var payload: [String: Any] = [
                     "path": fileURL.path(percentEncoded: false),
+                    "fileUri": fileURL.absoluteString,
                     "mimeType": "image/jpeg"
                 ]
+                if self?.pendingIncludeBase64 == true,
+                   let data = try? Data(contentsOf: fileURL) {
+                    payload["base64"] = "data:image/jpeg;base64," + data.base64EncodedString()
+                }
+                if capturedRegionIndicator,
+                   let color = CameraPhotoDelegate.extractColorFromRegion(
+                       image: finalImage,
+                       sizePercent: capturedRegionSize
+                   ) {
+                    payload["extractedColor"] = color
+                }
                 if let id = self?.pendingPhotoId {
                     payload["id"] = id
                 }
@@ -494,6 +571,13 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
             self?.pendingPhotoId = nil
             self?.pendingPhotoEvent = nil
             self?.pendingWatermarkOptions = nil
+            self?.pendingIncludeBase64 = false
+            self?.pendingPhotoQuality = 0.9
+            self?.pendingPhotoMaxWidth = nil
+            self?.pendingPhotoMaxHeight = nil
+            self?.pendingRegionIndicator = false
+            self?.pendingRegionShape = "circle"
+            self?.pendingRegionSize = 25.0
         }
     }
 
@@ -516,6 +600,13 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         pendingPhotoId = nil
         pendingPhotoEvent = nil
         pendingWatermarkOptions = nil
+        pendingIncludeBase64 = false
+        pendingPhotoQuality = 0.9
+        pendingPhotoMaxWidth = nil
+        pendingPhotoMaxHeight = nil
+        pendingRegionIndicator = false
+        pendingRegionShape = "circle"
+        pendingRegionSize = 25.0
     }
 
     // MARK: - Watermark
@@ -566,6 +657,39 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
         }
     }
 
+    // MARK: - Region colour extraction
+
+    /// Crops the centre region of [image] (a square of [sizePercent]% of the
+    /// shorter dimension) and returns the average colour as a lowercase hex
+    /// string, e.g. "#a3c5e1".
+    static func extractColorFromRegion(image: UIImage, sizePercent: CGFloat) -> String? {
+        let shorter = min(image.size.width, image.size.height)
+        let side    = shorter * sizePercent / 100.0
+        let cx      = image.size.width  / 2
+        let cy      = image.size.height / 2
+        // cgImage coordinate space uses the image's own scale, so multiply by scale.
+        let scale   = image.scale
+        let cropRect = CGRect(
+            x: (cx - side / 2) * scale,
+            y: (cy - side / 2) * scale,
+            width:  side * scale,
+            height: side * scale
+        )
+        guard let cropped = image.cgImage?.cropping(to: cropRect) else { return nil }
+
+        // Render at 1×1 to get average colour
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: 1, height: 1))
+        let avg = renderer.image { _ in
+            UIImage(cgImage: cropped).draw(in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        }
+
+        guard let data = avg.cgImage?.dataProvider?.data,
+              let ptr  = CFDataGetBytePtr(data) else { return nil }
+
+        let r = Int(ptr[0]), g = Int(ptr[1]), b = Int(ptr[2])
+        return String(format: "#%02x%02x%02x", r, g, b)
+    }
+
     private static func colorFromHex(_ hex: String) -> UIColor {
         let cleaned = hex.hasPrefix("#") ? String(hex.dropFirst()) : hex
         guard cleaned.count == 6, let rgb = UInt64(cleaned, radix: 16) else {
@@ -580,6 +704,90 @@ final class CameraPhotoDelegate: NSObject, UIImagePickerControllerDelegate, UINa
     }
 }
 
+// MARK: - UIImage Resize Helper
+
+private extension UIImage {
+    /// Scale down to fit within maxWidth × maxHeight, preserving aspect ratio. Never upscales.
+    func resizedIfNeeded(maxWidth: CGFloat?, maxHeight: CGFloat?) -> UIImage {
+        let limitW = maxWidth ?? .greatestFiniteMagnitude
+        let limitH = maxHeight ?? .greatestFiniteMagnitude
+        guard size.width > limitW || size.height > limitH else { return self }
+        let scale = min(limitW / size.width, limitH / size.height)
+        let newSize = CGSize(width: (size.width * scale).rounded(), height: (size.height * scale).rounded())
+        let renderer = UIGraphicsImageRenderer(size: newSize)
+        return renderer.image { _ in self.draw(in: CGRect(origin: .zero, size: newSize)) }
+    }
+}
+
+// MARK: - Region Indicator Overlay View
+
+/// Transparent overlay placed on top of the `UIImagePickerController` camera
+/// preview via `cameraOverlayView`.  Dims the periphery and draws a dashed
+/// circle or box in the centre so the user can see exactly which area will be
+/// sampled for colour extraction.
+private final class RegionIndicatorView: UIView {
+
+    var shape: String = "circle"
+    var sizePercent: CGFloat = 25.0
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isOpaque = false
+        isUserInteractionEnabled = false
+    }
+
+    required init?(coder: NSCoder) { fatalError("not used") }
+
+    override func draw(_ rect: CGRect) {
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
+
+        let shorter  = min(rect.width, rect.height)
+        let side     = shorter * sizePercent / 100.0
+        let cx       = rect.midX
+        // Place slightly above vertical centre — the standard camera controls
+        // bar occupies roughly the bottom 20 % of the screen.
+        let cy       = rect.height * 0.40
+        let halfSide = side / 2
+        let region   = CGRect(x: cx - halfSide, y: cy - halfSide,
+                              width: side,       height: side)
+
+        // ── 1. Dim the entire view ─────────────────────────────────────────
+        UIColor.black.withAlphaComponent(0.38).setFill()
+        UIRectFill(rect)
+
+        // ── 2. Punch a transparent hole for the indicator region ──────────
+        ctx.setBlendMode(.clear)
+        if shape.lowercased() == "circle" {
+            ctx.fillEllipse(in: region)
+        } else {
+            ctx.fill(region)
+        }
+        ctx.setBlendMode(.normal)
+
+        // ── 3. Dashed border around the region ────────────────────────────
+        UIColor.white.withAlphaComponent(0.90).setStroke()
+        let path: UIBezierPath = shape.lowercased() == "circle"
+            ? UIBezierPath(ovalIn: region)
+            : UIBezierPath(roundedRect: region, cornerRadius: 4)
+        path.lineWidth = 2.5
+        path.setLineDash([10, 5], count: 2, phase: 0)
+        path.stroke()
+
+        // ── 4. Label below the region ─────────────────────────────────────
+        let label = "Color Sample Area" as NSString
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font:            UIFont.systemFont(ofSize: 13, weight: .medium),
+            .foregroundColor: UIColor.white.withAlphaComponent(0.85)
+        ]
+        let labelSize = label.size(withAttributes: attrs)
+        label.draw(
+            at: CGPoint(x: cx - labelSize.width / 2, y: cy + halfSide + 10),
+            withAttributes: attrs
+        )
+    }
+}
+
 // MARK: - Gallery Manager
 
 final class CameraGalleryManager: NSObject {
@@ -587,11 +795,19 @@ final class CameraGalleryManager: NSObject {
 
     var pendingGalleryId: String?
     var pendingGalleryEvent: String?
+    var pendingIncludeBase64: Bool = false
+    var pendingGalleryQuality: CGFloat = 0.9
+    var pendingGalleryMaxWidth: CGFloat? = nil
+    var pendingGalleryMaxHeight: CGFloat? = nil
 
-    func openGallery(mediaType: String, multiple: Bool, maxItems: Int, id: String? = nil, event: String? = nil) {
-        // Store id and event for callback
+    func openGallery(mediaType: String, multiple: Bool, maxItems: Int, id: String? = nil, event: String? = nil, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil) {
+        // Store id, event, and options for callback
         pendingGalleryId = id
         pendingGalleryEvent = event
+        pendingIncludeBase64 = includeBase64
+        pendingGalleryQuality = quality
+        pendingGalleryMaxWidth = maxWidth
+        pendingGalleryMaxHeight = maxHeight
         guard let windowScene = UIApplication.shared.connectedScenes
             .compactMap({ $0 as? UIWindowScene })
             .first(where: { $0.activationState == .foregroundActive }),
@@ -668,6 +884,10 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
         // Capture event class and id before async processing
         let eventClass = pendingGalleryEvent ?? "Native\\Mobile\\Events\\Gallery\\MediaSelected"
         let capturedId = pendingGalleryId
+        let capturedIncludeBase64 = pendingIncludeBase64
+        let capturedQuality = pendingGalleryQuality
+        let capturedMaxWidth = pendingGalleryMaxWidth
+        let capturedMaxHeight = pendingGalleryMaxHeight
 
         for (index, result) in results.enumerated() {
             group.enter()
@@ -678,7 +898,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "image") { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "image", includeBase64: capturedIncludeBase64, quality: capturedQuality, maxWidth: capturedMaxWidth, maxHeight: capturedMaxHeight) { fileInfo in
                             if let fileInfo = fileInfo {
                                 processedFiles.append(fileInfo)
                             }
@@ -690,7 +910,7 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
                     defer { group.leave() }
 
                     if let url = url {
-                        self.copyFileToCache(url: url, index: index, type: "video") { fileInfo in
+                        self.copyFileToCache(url: url, index: index, type: "video", includeBase64: capturedIncludeBase64, quality: capturedQuality, maxWidth: capturedMaxWidth, maxHeight: capturedMaxHeight) { fileInfo in
                             if let fileInfo = fileInfo {
                                 processedFiles.append(fileInfo)
                             }
@@ -717,10 +937,14 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
             // Clean up
             self?.pendingGalleryId = nil
             self?.pendingGalleryEvent = nil
+            self?.pendingIncludeBase64 = false
+            self?.pendingGalleryQuality = 0.9
+            self?.pendingGalleryMaxWidth = nil
+            self?.pendingGalleryMaxHeight = nil
         }
     }
 
-    private func copyFileToCache(url: URL, index: Int, type: String, completion: @escaping ([String: Any]?) -> Void) {
+    private func copyFileToCache(url: URL, index: Int, type: String, includeBase64: Bool = false, quality: CGFloat = 0.9, maxWidth: CGFloat? = nil, maxHeight: CGFloat? = nil, completion: @escaping ([String: Any]?) -> Void) {
         let fileManager = FileManager.default
 
         // Use persistent application support directory with Gallery subfolder
@@ -742,12 +966,26 @@ extension CameraGalleryManager: PHPickerViewControllerDelegate {
 
             try fileManager.copyItem(at: url, to: destinationURL)
 
-            let fileInfo: [String: Any] = [
+            let mimeType = getMimeType(for: fileExtension)
+
+            // For images: resize/recompress if dimensions or quality specified
+            if type == "image", let image = UIImage(contentsOfFile: destinationURL.path) {
+                let resized = image.resizedIfNeeded(maxWidth: maxWidth, maxHeight: maxHeight)
+                if let jpegData = resized.jpegData(compressionQuality: quality) {
+                    try? jpegData.write(to: destinationURL)
+                }
+            }
+
+            var fileInfo: [String: Any] = [
                 "path": destinationURL.path,
-                "mimeType": getMimeType(for: fileExtension),
+                "fileUri": destinationURL.absoluteString,
+                "mimeType": mimeType,
                 "extension": fileExtension,
                 "type": type
             ]
+            if includeBase64, let data = try? Data(contentsOf: destinationURL) {
+                fileInfo["base64"] = "data:\(mimeType);base64," + data.base64EncodedString()
+            }
 
             completion(fileInfo)
         } catch {

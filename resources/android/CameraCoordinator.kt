@@ -13,6 +13,7 @@ import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import android.provider.MediaStore
+import android.util.Base64
 import android.util.Log
 import android.widget.Toast
 import androidx.activity.result.ActivityResultLauncher
@@ -70,9 +71,29 @@ class CameraCoordinator : Fragment() {
     @Volatile
     private var isVideoRecording = false
 
+    // Include base64 in event payloads
+    private var pendingIncludeBase64Photo: Boolean = false
+    private var pendingIncludeBase64Video: Boolean = false
+    private var pendingIncludeBase64Gallery: Boolean = false
+
+    // Photo quality / resize
+    private var pendingPhotoQuality: Int = 90
+    private var pendingPhotoMaxWidth: Int? = null
+    private var pendingPhotoMaxHeight: Int? = null
+
+    // Gallery quality / resize
+    private var pendingGalleryQuality: Int = 90
+    private var pendingGalleryMaxWidth: Int? = null
+    private var pendingGalleryMaxHeight: Int? = null
+
     // Gallery state
     private var pendingGalleryId: String? = null
     private var pendingGalleryEvent: String? = null
+
+    // Region indicator state (used when launching CameraOverlayActivity)
+    private var pendingRegionIndicator: Boolean = false
+    private var pendingRegionShape: String = "circle"
+    private var pendingRegionSize: Int = 25
 
     // Background processing
     private var fileProcessingExecutor: ExecutorService? = null
@@ -83,6 +104,7 @@ class CameraCoordinator : Fragment() {
     private lateinit var cameraPermissionLauncher: ActivityResultLauncher<String>
     private lateinit var galleryPickerSingle: ActivityResultLauncher<PickVisualMediaRequest>
     private lateinit var galleryPickerMultiple: ActivityResultLauncher<PickVisualMediaRequest>
+    private lateinit var overlayActivityLauncher: ActivityResultLauncher<Intent>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -110,7 +132,7 @@ class CameraCoordinator : Fragment() {
 
             if (granted) {
                 when (pendingCameraOperation) {
-                    "photo" -> proceedWithCameraCapture()
+                    "photo" -> if (pendingRegionIndicator) proceedWithOverlayCapture() else proceedWithCameraCapture()
                     "video" -> proceedWithVideoRecording(pendingMaxDuration)
                     else -> {
                         Log.e(TAG, "❌ Unknown camera operation: $pendingCameraOperation")
@@ -176,15 +198,22 @@ class CameraCoordinator : Fragment() {
                     if (actualPath != null) {
                         val file = File(actualPath)
 
+                        // Resize and/or re-compress if quality or dimensions were specified
+                        resizeAndCompressPhoto(file, pendingPhotoQuality, pendingPhotoMaxWidth, pendingPhotoMaxHeight)
+
                         // Apply watermark in-place on the gallery file if requested
                         pendingWatermarkOptions?.let { options ->
-                            applyWatermarkToFile(file, options)
+                            applyWatermarkToFile(file, options, pendingPhotoQuality)
                         }
 
                         val payload = JSONObject().apply {
                             put("path", actualPath)
+                            put("fileUri", "file://$actualPath")
                             put("mimeType", "image/jpeg")
                             pendingPhotoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Photo) {
+                                fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -198,14 +227,19 @@ class CameraCoordinator : Fragment() {
                                 input.copyTo(output)
                             }
                         }
+                        resizeAndCompressPhoto(dst, pendingPhotoQuality, pendingPhotoMaxWidth, pendingPhotoMaxHeight)
                         pendingWatermarkOptions?.let { options ->
-                            applyWatermarkToFile(dst, options)
+                            applyWatermarkToFile(dst, options, pendingPhotoQuality)
                         }
 
                         val payload = JSONObject().apply {
                             put("path", dst.absolutePath)
+                            put("fileUri", "file://${dst.absolutePath}")
                             put("mimeType", "image/jpeg")
                             pendingPhotoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Photo) {
+                                fileToBase64(dst, "image/jpeg")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -235,6 +269,13 @@ class CameraCoordinator : Fragment() {
             pendingPhotoId = null
             pendingPhotoEvent = null
             pendingWatermarkOptions = null
+            pendingIncludeBase64Photo = false
+            pendingPhotoQuality = 90
+            pendingPhotoMaxWidth = null
+            pendingPhotoMaxHeight = null
+            pendingRegionIndicator = false
+            pendingRegionShape = "circle"
+            pendingRegionSize = 25
         }
 
         // Video recorder launcher
@@ -263,8 +304,12 @@ class CameraCoordinator : Fragment() {
                     if (filePath != null) {
                         val payload = JSONObject().apply {
                             put("path", filePath)
+                            put("fileUri", "file://$filePath")
                             put("mimeType", "video/mp4")
                             pendingVideoId?.let { put("id", it) }
+                            if (pendingIncludeBase64Video) {
+                                fileToBase64(File(filePath), "video/mp4")?.let { put("base64", it) }
+                            }
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -305,6 +350,7 @@ class CameraCoordinator : Fragment() {
             pendingVideoId = null
             pendingVideoEvent = null
             isVideoRecording = false
+            pendingIncludeBase64Video = false
         }
 
         // Single gallery picker
@@ -322,6 +368,7 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val includeBase64 = pendingIncludeBase64Gallery
 
             if (uri != null) {
                 Log.d(TAG, "✅ Single gallery picker - URI received successfully")
@@ -369,8 +416,16 @@ class CameraCoordinator : Fragment() {
 
                         Log.d(TAG, "✅ File copied successfully")
 
+                        // Resize/compress image if quality or dimensions were specified
+                        if (mimeType.startsWith("image/")) {
+                            resizeAndCompressPhoto(dst, pendingGalleryQuality, pendingGalleryMaxWidth, pendingGalleryMaxHeight)
+                        }
+
                         // Get file metadata
                         val fileMetadata = getFileMetadata(uri, dst.absolutePath)
+                        if (includeBase64) {
+                            fileToBase64(dst, mimeType)?.let { b64 -> fileMetadata.put("base64", b64) }
+                        }
                         val filesArray = JSONArray()
                         filesArray.put(fileMetadata)
 
@@ -421,6 +476,7 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingIncludeBase64Gallery = false
         }
 
         // Multiple gallery picker
@@ -437,6 +493,7 @@ class CameraCoordinator : Fragment() {
 
             // Use default event if not provided
             val eventClass = pendingGalleryEvent ?: "Native\\Mobile\\Events\\Gallery\\MediaSelected"
+            val includeBase64 = pendingIncludeBase64Gallery
 
             if (uris.isNotEmpty()) {
                 Log.d(TAG, "📁 Processing ${uris.size} files - moving to background thread")
@@ -484,8 +541,16 @@ class CameraCoordinator : Fragment() {
                                 }
                             }
 
+                            // Resize/compress image if quality or dimensions were specified
+                            if (mimeType.startsWith("image/")) {
+                                resizeAndCompressPhoto(dst, pendingGalleryQuality, pendingGalleryMaxWidth, pendingGalleryMaxHeight)
+                            }
+
                             // Get file metadata and add to array
                             val fileMetadata = getFileMetadata(uri, dst.absolutePath)
+                            if (includeBase64) {
+                                fileToBase64(dst, mimeType)?.let { b64 -> fileMetadata.put("base64", b64) }
+                            }
                             filesArray.put(fileMetadata)
                         }
 
@@ -534,6 +599,17 @@ class CameraCoordinator : Fragment() {
             // Clean up pending state
             pendingGalleryId = null
             pendingGalleryEvent = null
+            pendingIncludeBase64Gallery = false
+            pendingGalleryQuality = 90
+            pendingGalleryMaxWidth = null
+            pendingGalleryMaxHeight = null
+        }
+
+        // Overlay camera activity launcher (used when regionIndicator = true)
+        overlayActivityLauncher = registerForActivityResult(
+            ActivityResultContracts.StartActivityForResult()
+        ) { result ->
+            handleOverlayActivityResult(result)
         }
     }
 
@@ -551,14 +627,21 @@ class CameraCoordinator : Fragment() {
         Log.d(TAG, "🧹 Fragment destroyed and resources cleaned up")
     }
 
-    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null) {
+    fun launchCamera(id: String? = null, event: String? = null, watermark: Map<String, Any>? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null, regionIndicator: Boolean = false, regionShape: String = "circle", regionSize: Int = 25) {
         val context = requireContext()
 
-        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}")
+        Log.d(TAG, "📸 launchCamera called - id=$id, event=$event, watermark=${watermark != null}, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight, regionIndicator=$regionIndicator, regionShape=$regionShape, regionSize=$regionSize")
 
         pendingPhotoId = id
         pendingPhotoEvent = event
         pendingWatermarkOptions = watermark
+        pendingIncludeBase64Photo = includeBase64
+        pendingPhotoQuality = quality
+        pendingPhotoMaxWidth = maxWidth
+        pendingPhotoMaxHeight = maxHeight
+        pendingRegionIndicator = regionIndicator
+        pendingRegionShape = regionShape
+        pendingRegionSize = regionSize
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -572,7 +655,7 @@ class CameraCoordinator : Fragment() {
             return
         }
 
-        proceedWithCameraCapture()
+        if (pendingRegionIndicator) proceedWithOverlayCapture() else proceedWithCameraCapture()
     }
 
     private fun proceedWithCameraCapture() {
@@ -609,7 +692,7 @@ class CameraCoordinator : Fragment() {
         cameraLauncher.launch(photoUri)
     }
 
-    fun launchVideoRecorder(maxDuration: Int?, id: String? = null, event: String? = null) {
+    fun launchVideoRecorder(maxDuration: Int?, id: String? = null, event: String? = null, includeBase64: Boolean = false) {
         val context = requireContext()
 
         synchronized(this) {
@@ -625,6 +708,7 @@ class CameraCoordinator : Fragment() {
 
         pendingVideoId = id
         pendingVideoEvent = event
+        pendingIncludeBase64Video = includeBase64
 
         val cameraPermissionGranted = ContextCompat.checkSelfPermission(
             context,
@@ -686,11 +770,15 @@ class CameraCoordinator : Fragment() {
         videoRecorderLauncher.launch(intent)
     }
 
-    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null) {
-        Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event")
+    fun launchGallery(mediaType: String, multiple: Boolean, maxItems: Int, id: String? = null, event: String? = null, includeBase64: Boolean = false, quality: Int = 90, maxWidth: Int? = null, maxHeight: Int? = null) {
+        Log.d(TAG, "🖼️ launchGallery: mediaType=$mediaType, multiple=$multiple, maxItems=$maxItems, id=$id, event=$event, quality=$quality, maxWidth=$maxWidth, maxHeight=$maxHeight")
 
         pendingGalleryId = id
         pendingGalleryEvent = event
+        pendingIncludeBase64Gallery = includeBase64
+        pendingGalleryQuality = quality
+        pendingGalleryMaxWidth = maxWidth
+        pendingGalleryMaxHeight = maxHeight
 
         val visualMediaType = when (mediaType.lowercase()) {
             "image", "images" -> ActivityResultContracts.PickVisualMedia.ImageOnly
@@ -800,6 +888,7 @@ class CameraCoordinator : Fragment() {
 
             metadata.apply {
                 put("path", cachePath)
+                put("fileUri", "file://$cachePath")
                 put("mimeType", mimeType)
                 put("extension", extension)
                 put("type", type)
@@ -819,7 +908,47 @@ class CameraCoordinator : Fragment() {
         return metadata
     }
 
-    private fun applyWatermarkToFile(file: File, options: Map<String, Any>) {
+    private fun resizeAndCompressPhoto(file: File, quality: Int, maxWidth: Int?, maxHeight: Int?) {
+        // Decode bounds cheaply first to decide if resize is needed
+        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        val origWidth = bounds.outWidth
+        val origHeight = bounds.outHeight
+
+        val needsResize = (maxWidth != null && origWidth > maxWidth) ||
+                          (maxHeight != null && origHeight > maxHeight)
+
+        // Nothing to do if no resize and quality matches default
+        if (!needsResize && quality == 90) return
+
+        val original = BitmapFactory.decodeFile(file.absolutePath) ?: return
+
+        val bitmap = if (needsResize) {
+            val scaleX = maxWidth?.let { it.toFloat() / origWidth } ?: Float.MAX_VALUE
+            val scaleY = maxHeight?.let { it.toFloat() / origHeight } ?: Float.MAX_VALUE
+            val scale = minOf(scaleX, scaleY)
+            val newWidth = (origWidth * scale).toInt()
+            val newHeight = (origHeight * scale).toInt()
+            val scaled = Bitmap.createScaledBitmap(original, newWidth, newHeight, true)
+            original.recycle()
+            scaled
+        } else {
+            original
+        }
+
+        try {
+            file.outputStream().use { out ->
+                bitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
+            }
+            Log.d(TAG, "📐 Photo resized/compressed: ${origWidth}x${origHeight} → ${bitmap.width}x${bitmap.height} @ quality=$quality")
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error resizing/compressing photo: ${e.message}", e)
+        } finally {
+            bitmap.recycle()
+        }
+    }
+
+    private fun applyWatermarkToFile(file: File, options: Map<String, Any>, quality: Int = 90) {
         val text = options["text"] as? String ?: return
         val position = (options["position"] as? String ?: "bottom-right").lowercase()
         val colorHex = options["color"] as? String ?: "#FFFFFF"
@@ -855,7 +984,7 @@ class CameraCoordinator : Fragment() {
             canvas.drawText(text, x, y, paint)
 
             file.outputStream().use { out ->
-                mutable.compress(Bitmap.CompressFormat.JPEG, 90, out)
+                mutable.compress(Bitmap.CompressFormat.JPEG, quality, out)
             }
             mutable.recycle()
 
@@ -873,7 +1002,151 @@ class CameraCoordinator : Fragment() {
         }
     }
 
+    private fun fileToBase64(file: File, mimeType: String): String? {
+        return try {
+            val bytes = file.readBytes()
+            val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+            "data:$mimeType;base64,$encoded"
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error encoding file to base64: ${e.message}", e)
+            null
+        }
+    }
+
     private fun dispatchEvent(event: String, payloadJson: String) {
         NativeActionCoordinator.dispatchEvent(requireActivity(), event, payloadJson)
+    }
+
+    // -------------------------------------------------------------------------
+    // Region indicator — custom camera overlay (CameraOverlayActivity)
+    // -------------------------------------------------------------------------
+
+    private fun proceedWithOverlayCapture() {
+        val context = requireContext()
+        CameraForegroundService.start(context)
+        Log.d(TAG, "📸 Launching CameraOverlayActivity (shape=$pendingRegionShape, size=$pendingRegionSize%)")
+        val intent = CameraOverlayActivity.createIntent(context, pendingRegionShape, pendingRegionSize)
+        overlayActivityLauncher.launch(intent)
+    }
+
+    private fun handleOverlayActivityResult(result: androidx.activity.result.ActivityResult) {
+        if (!isAdded || context == null) {
+            Log.e(TAG, "Fragment not attached, ignoring overlay result")
+            return
+        }
+
+        CameraForegroundService.stop(requireContext())
+
+        val eventClass = pendingPhotoEvent ?: "Native\\Mobile\\Events\\Camera\\PhotoTaken"
+        val cancelEventClass = "Native\\Mobile\\Events\\Camera\\PhotoCancelled"
+
+        if (result.resultCode == android.app.Activity.RESULT_OK) {
+            val photoPath = result.data?.getStringExtra(CameraOverlayActivity.RESULT_PHOTO_PATH)
+            if (photoPath != null) {
+                // Capture state before clearing it
+                val capturedId = pendingPhotoId
+                val capturedQuality = pendingPhotoQuality
+                val capturedMaxWidth = pendingPhotoMaxWidth
+                val capturedMaxHeight = pendingPhotoMaxHeight
+                val capturedWatermark = pendingWatermarkOptions
+                val capturedIncludeBase64 = pendingIncludeBase64Photo
+                val capturedRegionSize = pendingRegionSize
+
+                cleanupOverlayPhotoState()
+
+                fileProcessingExecutor?.execute {
+                    try {
+                        val file = File(photoPath)
+
+                        resizeAndCompressPhoto(file, capturedQuality, capturedMaxWidth, capturedMaxHeight)
+                        capturedWatermark?.let { applyWatermarkToFile(file, it, capturedQuality) }
+
+                        val payload = JSONObject().apply {
+                            put("path", file.absolutePath)
+                            put("fileUri", "file://${file.absolutePath}")
+                            put("mimeType", "image/jpeg")
+                            capturedId?.let { put("id", it) }
+                            if (capturedIncludeBase64) {
+                                fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
+                            }
+                            extractColorFromRegion(file, capturedRegionSize)?.let {
+                                put("extractedColor", it)
+                            }
+                        }
+
+                        activity?.runOnUiThread {
+                            dispatchEvent(eventClass, payload.toString())
+                            Log.d(TAG, "✅ Overlay photo captured: ${file.absolutePath}")
+                        }
+                    } catch (e: Exception) {
+                        Log.e(TAG, "❌ Error processing overlay photo: ${e.message}", e)
+                        val payload = JSONObject().apply {
+                            put("cancelled", true)
+                            pendingPhotoId?.let { put("id", it) }
+                        }
+                        activity?.runOnUiThread { dispatchEvent(cancelEventClass, payload.toString()) }
+                    }
+                }
+            } else {
+                val payload = JSONObject().apply {
+                    put("cancelled", true)
+                    pendingPhotoId?.let { put("id", it) }
+                }
+                dispatchEvent(cancelEventClass, payload.toString())
+                cleanupOverlayPhotoState()
+            }
+        } else {
+            Log.d(TAG, "⚠️ CameraOverlayActivity was cancelled")
+            val payload = JSONObject().apply {
+                put("cancelled", true)
+                pendingPhotoId?.let { put("id", it) }
+            }
+            dispatchEvent(cancelEventClass, payload.toString())
+            cleanupOverlayPhotoState()
+        }
+    }
+
+    private fun cleanupOverlayPhotoState() {
+        pendingPhotoId = null
+        pendingPhotoEvent = null
+        pendingWatermarkOptions = null
+        pendingIncludeBase64Photo = false
+        pendingPhotoQuality = 90
+        pendingPhotoMaxWidth = null
+        pendingPhotoMaxHeight = null
+        pendingRegionIndicator = false
+        pendingRegionShape = "circle"
+        pendingRegionSize = 25
+    }
+
+    /**
+     * Scales down the center region of [file] to 1×1 pixel and returns the
+     * average colour as a lowercase hex string (e.g. "#a3c5e1").
+     */
+    private fun extractColorFromRegion(file: File, regionSizePercent: Int): String? {
+        return try {
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath) ?: return null
+            val side = (minOf(bitmap.width, bitmap.height) * regionSizePercent / 100.0)
+                .toInt().coerceAtLeast(1)
+            val left = ((bitmap.width  - side) / 2).coerceAtLeast(0)
+            val top  = ((bitmap.height - side) / 2).coerceAtLeast(0)
+            val w    = minOf(side, bitmap.width  - left)
+            val h    = minOf(side, bitmap.height - top)
+
+            val region = Bitmap.createBitmap(bitmap, left, top, w, h)
+            bitmap.recycle()
+
+            // Scale to 1×1 → average colour
+            val scaled = Bitmap.createScaledBitmap(region, 1, 1, true)
+            region.recycle()
+
+            val pixel = scaled.getPixel(0, 0)
+            scaled.recycle()
+
+            String.format("#%02x%02x%02x", Color.red(pixel), Color.green(pixel), Color.blue(pixel))
+        } catch (e: Exception) {
+            Log.e(TAG, "❌ Error extracting region colour: ${e.message}", e)
+            null
+        }
     }
 }

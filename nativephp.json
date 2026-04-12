@@ -10,6 +10,10 @@
             "parameters": {
                 "id": "optional string — ID to track this capture",
                 "event": "optional string — custom event class to fire",
+                "includeBase64": "optional boolean — include base64-encoded image data in the event payload (default: false)",
+                "quality": "optional number — JPEG compression quality 1–100 (default: 90). Lower values produce smaller files",
+                "width": "optional number — maximum output width in pixels; image is scaled down proportionally if wider (never upscaled)",
+                "height": "optional number — maximum output height in pixels; image is scaled down proportionally if taller (never upscaled)",
                 "watermark": {
                     "description": "optional object — overlay a text watermark on the captured photo",
                     "text": "string — watermark text",
@@ -17,20 +21,40 @@
                     "color": "optional string — hex color, e.g. #FFFFFF (default)",
                     "size": "optional number — font size in px/pt (default: 48)",
                     "opacity": "optional number — 0.0 to 1.0 (default: 0.7)"
-                }
+                },
+                "regionIndicator": "optional boolean — show a circle or box in the camera viewfinder indicating the color extraction area (default: false). On iOS the overlay is live; on Android a custom CameraX preview is used",
+                "regionShape": "optional string — shape of the region indicator: \"circle\" (default) or \"box\"",
+                "regionSize": "optional number — size of the region indicator as a percentage of the shorter screen/image dimension, 1–100 (default: 25)"
             }
         },
         {
             "name": "Camera.RecordVideo",
             "android": "com.nativephp.camera.CameraFunctions.RecordVideo",
             "ios": "CameraFunctions.RecordVideo",
-            "description": "Record a video with the device camera"
+            "description": "Record a video with the device camera",
+            "parameters": {
+                "maxDuration": "optional int — maximum recording duration in seconds",
+                "id": "optional string — ID to track this recording",
+                "event": "optional string — custom event class to fire",
+                "includeBase64": "optional boolean — include base64-encoded video data in the event payload (default: false)"
+            }
         },
         {
             "name": "Camera.PickMedia",
             "android": "com.nativephp.camera.GalleryFunctions.PickMedia",
             "ios": "CameraFunctions.PickMedia",
-            "description": "Pick media from the device gallery"
+            "description": "Pick media from the device gallery",
+            "parameters": {
+                "mediaType": "optional string — image, video, or all (default: all)",
+                "multiple": "optional boolean — allow multiple selection (default: false)",
+                "maxItems": "optional int — maximum items when multiple=true (default: 10)",
+                "id": "optional string — ID to track this operation",
+                "event": "optional string — custom event class to fire",
+                "includeBase64": "optional boolean — include base64-encoded data for each file in the event payload (default: false)",
+                "quality": "optional number — JPEG compression quality 1–100 applied to images before base64 encoding (default: 90). Strongly recommended when includeBase64 is true to avoid out-of-memory errors on large gallery images",
+                "width": "optional number — maximum output width in pixels; image is scaled down proportionally if wider (never upscaled)",
+                "height": "optional number — maximum output height in pixels; image is scaled down proportionally if taller (never upscaled)"
+            }
         }
     ],
 
@@ -45,8 +69,19 @@
             "android.permission.WRITE_EXTERNAL_STORAGE"
         ],
         "dependencies": {
-            "implementation": []
+            "implementation": [
+                "androidx.camera:camera-camera2:1.3.4",
+                "androidx.camera:camera-lifecycle:1.3.4",
+                "androidx.camera:camera-view:1.3.4"
+            ]
         },
+        "activities": [
+            {
+                "name": ".CameraOverlayActivity",
+                "exported": false,
+                "screenOrientation": "portrait"
+            }
+        ],
         "services": [
             {
                 "name": ".CameraForegroundService",
