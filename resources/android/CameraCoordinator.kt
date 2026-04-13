@@ -214,9 +214,7 @@ class CameraCoordinator : Fragment() {
                             if (pendingIncludeBase64Photo) {
                                 fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
                             }
-                            if (pendingRegionIndicator) {
-                                extractColorFromRegion(file, pendingRegionSize)?.let { put("extractedColor", it) }
-                            }
+                            // extractedColor temporarily disabled — focus on overlay display first
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -243,9 +241,7 @@ class CameraCoordinator : Fragment() {
                             if (pendingIncludeBase64Photo) {
                                 fileToBase64(dst, "image/jpeg")?.let { put("base64", it) }
                             }
-                            if (pendingRegionIndicator) {
-                                extractColorFromRegion(dst, pendingRegionSize)?.let { put("extractedColor", it) }
-                            }
+                            // extractedColor temporarily disabled — focus on overlay display first
                         }
 
                         dispatchEvent(eventClass, payload.toString())
@@ -1065,7 +1061,6 @@ class CameraCoordinator : Fragment() {
                 val capturedMaxHeight = pendingPhotoMaxHeight
                 val capturedWatermark = pendingWatermarkOptions
                 val capturedIncludeBase64 = pendingIncludeBase64Photo
-                val capturedRegionSize = pendingRegionSize
 
                 cleanupOverlayPhotoState()
 
@@ -1084,9 +1079,7 @@ class CameraCoordinator : Fragment() {
                             if (capturedIncludeBase64) {
                                 fileToBase64(file, "image/jpeg")?.let { put("base64", it) }
                             }
-                            extractColorFromRegion(file, capturedRegionSize)?.let {
-                                put("extractedColor", it)
-                            }
+                            // extractedColor temporarily disabled — focus on overlay display first
                         }
 
                         activity?.runOnUiThread {

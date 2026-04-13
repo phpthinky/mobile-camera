@@ -14,6 +14,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
+import android.view.ViewTreeObserver
 import android.view.WindowInsets
 import android.view.WindowInsetsController
 import android.widget.FrameLayout
@@ -126,8 +127,17 @@ class CameraOverlayActivity : ComponentActivity() {
 
         setContentView(root)
 
-        // Bind camera — overlay becomes visible only after successful bind
-        startCamera(previewView)
+        // Wait until PreviewView is fully attached and measured before binding CameraX.
+        // Calling ProcessCameraProvider before the view is laid out can cause a crash
+        // because the Surface provider has no dimensions yet.
+        previewView.viewTreeObserver.addOnGlobalLayoutListener(
+            object : ViewTreeObserver.OnGlobalLayoutListener {
+                override fun onGlobalLayout() {
+                    previewView.viewTreeObserver.removeOnGlobalLayoutListener(this)
+                    startCamera(previewView)
+                }
+            }
+        )
     }
 
     // ── CameraX ───────────────────────────────────────────────────────────────
