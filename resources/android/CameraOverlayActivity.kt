@@ -65,7 +65,6 @@ class CameraOverlayActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        goFullscreen()
 
         val shape = intent.getStringExtra(EXTRA_REGION_SHAPE) ?: "circle"
         val size  = intent.getIntExtra(EXTRA_REGION_SIZE, 25)
@@ -126,6 +125,10 @@ class CameraOverlayActivity : ComponentActivity() {
         })
 
         setContentView(root)
+
+        // goFullscreen() must be called AFTER setContentView so the DecorView exists.
+        // Calling window.insetsController before DecorView is created NPEs inside PhoneWindow.
+        goFullscreen()
 
         // Wait until PreviewView is fully attached and measured before binding CameraX.
         // Calling ProcessCameraProvider before the view is laid out can cause a crash
